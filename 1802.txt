@@ -1,0 +1,1636 @@
+using BOBDrive.Models;
+using System;
+using System.IO;
+using System.Linq;
+using System.Web;
+using System.Web.Mvc;
+using System.Configuration;
+using System.Threading.Tasks;
+using System.Net;
+using System.Data.Entity;
+using System.Web.Hosting;
+//using Ionic.Zip; // From DotNetZip library
+using System.Text;
+using System.Security.Cryptography;
+using System.Collections.Concurrent;
+
+namespace BOBDrive.Controllers
+{
+    /// <summary>
+    /// Tracks progress information for uploads in-memory.
+    /// </summary>
+    public static class UploadProgressTracker
+    {
+        private static ConcurrentDictionary<string, ProgressInfo> _map
+            = new ConcurrentDictionary<string, ProgressInfo>();
+
+        public static ProgressInfo CreateEntry(string fileId)
+        {
+            var info = new ProgressInfo { Progress = 0, IsDone = false, FileName = null, ErrorMessage = null };
+            _map[fileId] = info;
+            return info;
+        }
+
+        public static bool TryGet(string fileId, out ProgressInfo info)
+        {
+            return _map.TryGetValue(fileId, out info);
+        }
+
+        public static void Remove(string fileId)
+        {
+            ProgressInfo removed;
+            _map.TryRemove(fileId, out removed);
+        }
+    }
+
+    public class ProgressInfo
+    {
+        /// <summary>
+        /// Progress percentage: 0..100 for normal; -1 indicates error.
+        /// </summary>
+        public int Progress { get; set; }
+        public bool IsDone { get; set; }
+        /// <summary>
+        /// Final file name when done.
+        /// </summary>
+        public string FileName { get; set; }
+        /// <summary>
+        /// If error: set Progress = -1 and ErrorMessage non-null.
+        /// </summary>
+        public string ErrorMessage { get; set; }
+    }
+
+    public class FileController : BaseController
+    {
+        private readonly string _finalUploadPath;
+        private readonly string _tempChunkPath;
+        private readonly string _tempMergePath;
+
+        public FileController()
+        {
+            string fileUploadPathSetting = ConfigurationManager.AppSettings["FileUploadPath"];
+            string tempChunkUploadPathSetting = ConfigurationManager.AppSettings["TempChunkUploadPath"];
+            string tempMergePathSetting = ConfigurationManager.AppSettings["TempMergePath"]; // New setting for merge temp storage
+
+            if (string.IsNullOrEmpty(fileUploadPathSetting))
+                throw new Exception("Configuration Error: 'FileUploadPath' not set.");
+            if (string.IsNullOrEmpty(tempChunkUploadPathSetting))
+                throw new Exception("Configuration Error: 'TempChunkUploadPath' not set.");
+            if (string.IsNullOrEmpty(tempMergePathSetting))
+            {
+                // Fallback: use a subfolder under TempChunkUploadPath
+                tempMergePathSetting = tempChunkUploadPathSetting + "/MergedFiles";
+            }
+
+            _finalUploadPath = HostingEnvironment.MapPath(fileUploadPathSetting);
+            _tempChunkPath = HostingEnvironment.MapPath(tempChunkUploadPathSetting);
+            _tempMergePath = HostingEnvironment.MapPath(tempMergePathSetting);
+
+            if (_finalUploadPath == null)
+                throw new Exception("Configuration Error: Could not resolve 'FileUploadPath'.");
+            if (_tempChunkPath == null)
+                throw new Exception("Configuration Error: Could not resolve 'TempChunkPath'.");
+            if (_tempMergePath == null)
+                throw new Exception("Configuration Error: Could not resolve 'TempMergePath'.");
+
+            if (!Directory.Exists(_finalUploadPath))
+                Directory.CreateDirectory(_finalUploadPath);
+            if (!Directory.Exists(_tempChunkPath))
+                Directory.CreateDirectory(_tempChunkPath);
+            if (!Directory.Exists(_tempMergePath))
+                Directory.CreateDirectory(_tempMergePath);
+        }
+
+        // POST: /File/CheckDiskSpace
+        [HttpPost]
+        public JsonResult CheckDiskSpace(long totalFileSize)
+        {
+            try
+            {
+                string driveRoot = Path.GetPathRoot(_finalUploadPath);
+                DriveInfo drive = new DriveInfo(driveRoot);
+                if (drive.AvailableFreeSpace < totalFileSize)
+                {
+                    return Json(new { success = false, message = "Not enough disk space for the entire file." });
+                }
+                return Json(new { success = true });
+            }
+            catch (Exception ex)
+            {
+                return Json(new { success = false, message = "Could not verify disk space: " + ex.Message });
+            }
+        }
+
+        // POST: /File/UploadChunk
+        [HttpPost]
+        public async Task<JsonResult> UploadChunk(
+            HttpPostedFileBase chunk,
+            string fileIdForUpload,
+            int chunkNumber,
+            int totalChunks,
+            string originalFileName,
+            int folderId,
+            long totalFileSize,
+            string fileContentType)
+        {
+            if (chunk == null || chunk.ContentLength == 0)
+            {
+                return Json(new { success = false, message = "Empty chunk received." });
+            }
+
+            try
+            {
+                string driveRoot = Path.GetPathRoot(_finalUploadPath);
+                DriveInfo drive = new DriveInfo(driveRoot);
+                if (drive.AvailableFreeSpace < chunk.ContentLength)
+                {
+                    return Json(new { success = false, errorCode = "DiskFull", message = "Server: Insufficient disk space." });
+                }
+
+                string chunkDirectory = Path.Combine(_tempChunkPath, fileIdForUpload);
+                if (!Directory.Exists(chunkDirectory))
+                    Directory.CreateDirectory(chunkDirectory);
+
+                string chunkFilePath = Path.Combine(chunkDirectory, chunkNumber.ToString());
+                chunk.SaveAs(chunkFilePath);
+
+                var fileChunk = new FileChunk
+                {
+                    FileIdForUpload = fileIdForUpload,
+                    ChunkNumber = chunkNumber,
+                    ChunkFilePath = chunkFilePath,
+                    UploadedAt = DateTime.UtcNow
+                };
+                db.FileChunks.Add(fileChunk);
+                await db.SaveChangesAsync();
+
+                int chunksUploadedCount = db.FileChunks.Count(fc => fc.FileIdForUpload == fileIdForUpload);
+                if (chunksUploadedCount == totalChunks)
+                {
+                    return Json(new { success = true, allChunksUploaded = true, fileIdForUpload = fileIdForUpload });
+                }
+
+                return Json(new { success = true, message = "Chunk " + (chunkNumber + 1) + " of " + totalChunks + " uploaded.", allChunksUploaded = false });
+            }
+            catch (Exception ex)
+            {
+                return Json(new { success = false, message = "Error processing chunk: " + ex.Message });
+            }
+        }
+
+        /// <summary>
+        /// Creates a new folder in the specified parent folder.
+        /// </summary>
+        [HttpPost]
+        public async Task<JsonResult> CreateFolder(string folderName, int? parentFolderId)
+        {
+            if (string.IsNullOrWhiteSpace(folderName))
+            {
+                return Json(new { success = false, message = "Folder name cannot be empty." });
+            }
+
+            // Prevent creation of reserved names if any
+            if (folderName.Equals(".") || folderName.Equals(".."))
+            {
+                return Json(new { success = false, message = "Invalid folder name." });
+            }
+
+            try
+            {
+                var newFolder = new Folder
+                {
+                    Name = folderName,
+                    ParentFolderId = parentFolderId == 0 ? (int?)null : parentFolderId,
+                    CreatedAt = DateTime.UtcNow,
+                    // OwnerUserId = ... // Set owner if your app requires it
+                };
+                db.Folders.Add(newFolder);
+                await db.SaveChangesAsync();
+                return Json(new { success = true, message = "Folder created successfully." });
+            }
+            catch (Exception ex)
+            {
+                // Log the exception ex
+                return Json(new { success = false, message = "An error occurred while creating the folder." });
+            }
+        }
+
+        // GET: /File/GetFolderContents
+        public ActionResult GetFolderContents(int? folderId)
+        {
+            int actualFolderId = folderId ?? 0;
+
+            var folderFromDb = db.Folders.Find(actualFolderId);
+            if (folderId == 0 || folderId == null)
+            {
+                folderFromDb = db.Folders.FirstOrDefault(f => f.ParentFolderId == null);
+            }
+            if (folderFromDb == null)
+            {
+                // Create a root folder if it doesn't exist at all
+                folderFromDb = new Folder
+                {
+                    Id = 0,
+                    Name = "My Drive", // Changed from Root
+                    ParentFolderId = null,
+                    CreatedAt = DateTime.UtcNow
+                };
+            }
+
+            var vm = new BOBDrive.ViewModels.FolderViewModel
+            {
+                CurrentFolder = folderFromDb,
+                SubFolders = db.Folders.Where(f => f.ParentFolderId == folderFromDb.Id).ToList(),
+                Files = db.Files.Where(f => f.FolderId == folderFromDb.Id && !f.IsProcessing)
+                                .OrderByDescending(f => f.UploadedAt).ToList(),
+                ParentOfCurrentFolderId = folderFromDb.ParentFolderId
+            };
+            return PartialView("_FolderContentsPartial", vm);
+        }
+
+        // POST: /File/CancelUpload
+        [HttpPost]
+        public async Task<JsonResult> CancelUpload(string fileIdForUpload)
+        {
+            if (string.IsNullOrEmpty(fileIdForUpload))
+            {
+                return Json(new { success = false, message = "Invalid file ID." });
+            }
+
+            try
+            {
+                // Also delete any file record that was created but is still processing
+                var fileRecord = await db.Files.FirstOrDefaultAsync(f => f.FileIdForUpload == fileIdForUpload && f.IsProcessing);
+                if (fileRecord != null)
+                {
+                    if (System.IO.File.Exists(fileRecord.FilePath))
+                    {
+                        System.IO.File.Delete(fileRecord.FilePath);
+                    }
+                    db.Files.Remove(fileRecord);
+                }
+
+                var chunks = await db.FileChunks
+                               .Where(fc => fc.FileIdForUpload == fileIdForUpload)
+                               .ToListAsync();
+                foreach (var chunk in chunks)
+                {
+                    try
+                    {
+                        if (System.IO.File.Exists(chunk.ChunkFilePath))
+                        {
+                            System.IO.File.Delete(chunk.ChunkFilePath);
+                        }
+                    }
+                    catch { /* Ignore and continue */ }
+                }
+
+                var tempChunkPathSetting = ConfigurationManager.AppSettings["TempChunkUploadPath"];
+                var tempRoot = HostingEnvironment.MapPath(tempChunkPathSetting);
+                if (!string.IsNullOrEmpty(tempRoot))
+                {
+                    var chunkDirectory = Path.Combine(tempRoot, fileIdForUpload);
+                    if (Directory.Exists(chunkDirectory))
+                    {
+                        Directory.Delete(chunkDirectory, recursive: true);
+                    }
+                }
+
+                if (chunks.Any())
+                {
+                    db.FileChunks.RemoveRange(chunks);
+                }
+
+                await db.SaveChangesAsync();
+                return Json(new { success = true });
+            }
+            catch (System.Exception ex)
+            {
+                // Log ex.Message
+                return Json(new { success = false, message = "Error during cancellation: " + ex.Message });
+            }
+        }
+
+        // NEW: StartFinalization now accepts and passes the checksum
+        [HttpPost]
+        public async Task<JsonResult> StartFinalization(
+            string fileIdForUpload,
+            string originalFileName,
+            int folderId,
+            long totalFileSize,
+            string fileContentType,
+            bool createZip,
+            string originalFileChecksum)
+        {
+            // Verify that chunks for this upload exist in the database
+            if (!db.FileChunks.Any(fc => fc.FileIdForUpload == fileIdForUpload))
+            {
+                return Json(new { success = false, message = "No chunks found for this file. Please try the upload again." });
+            }
+
+            // Create an in-memory tracker for the client to poll
+            UploadProgressTracker.CreateEntry(fileIdForUpload);
+
+            // Queue the background process. All DB operations are now handled there.
+            HostingEnvironment.QueueBackgroundWorkItem(ct =>
+                ProcessUploadInBackground(
+                    fileIdForUpload,
+                    originalFileName,
+                    folderId,
+                    totalFileSize,
+                    fileContentType,
+                    createZip,
+                    originalFileChecksum)
+            );
+
+            // Tell the client to start polling for progress
+            return Json(new { success = true, action = "poll" });
+        }
+
+        /// <summary>
+        /// Background processing: merge chunks, verify checksum, optionally zip, update DB and in-memory progress.
+        /// </summary>
+        private async Task ProcessUploadInBackground(
+      string fileIdForUpload,
+      string originalFileName,
+      int folderId,
+      long totalFileSize,
+      string fileContentType,
+      bool createZip,
+      string originalFileChecksum)
+        {
+            ProgressInfo info;
+            if (!UploadProgressTracker.TryGet(fileIdForUpload, out info))
+            {
+                // If no progress tracker exists, we cannot report progress. Abort.
+                return;
+            }
+
+            // Sanitize the filename to prevent path traversal attacks
+            var safeOriginalFileName = Path.GetFileName(originalFileName);
+
+            string chunkDir = Path.Combine(_tempChunkPath, fileIdForUpload);
+            string mergeDir = Path.Combine(_tempMergePath, fileIdForUpload);
+            string mergedFilePath = Path.Combine(mergeDir, safeOriginalFileName);
+
+            try
+            {
+                Directory.CreateDirectory(mergeDir);
+
+                // --- 1. Merge all chunks ---
+                info.Progress = 1; // Indicate that we've started.
+                var chunkFiles = Directory.GetFiles(chunkDir)
+                    .OrderBy(f => int.Parse(Path.GetFileName(f)))
+                    .ToList();
+
+                if (chunkFiles.Count == 0)
+                {
+                    throw new IOException("No chunk files were found on the server to merge. The upload may have been interrupted or failed to start correctly.");
+                }
+
+                // Use a larger buffer for file operations to improve performance with large files.
+                const int bufferSize = 81920;
+
+                using (var destStream = new FileStream(mergedFilePath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize, useAsync: true))
+                {
+                    for (int i = 0; i < chunkFiles.Count; i++)
+                    {
+                        var chunkPath = chunkFiles[i];
+                        using (var sourceStream = new FileStream(chunkPath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize, useAsync: true))
+                        {
+                            await sourceStream.CopyToAsync(destStream);
+                        }
+                        // Update progress: Merging accounts for the first 50%
+                        info.Progress = (int)Math.Floor(((i + 1.0) / chunkFiles.Count) * 50.0);
+                    }
+                }
+
+                // --- 2. Verify checksum of the fully merged file ---
+                // This is a critical step. Progress is set to 51% to show verification has started.
+                info.Progress = 51;
+                string serverHashHex = ComputeSha256(mergedFilePath);
+
+                if (!string.Equals(serverHashHex, originalFileChecksum, StringComparison.OrdinalIgnoreCase))
+                {
+                    // CRITICAL: This is the error you are likely getting. The new message provides both hashes for debugging.
+                    string errorMessage = string.Format(
+                        "Checksum mismatch, the uploaded file is likely corrupt. Please try the upload again. Client Hash: [{0}], Server Hash: [{1}]",
+                        originalFileChecksum,
+                        serverHashHex
+                    );
+                    throw new CryptographicException(errorMessage);
+                }
+                info.Progress = 75; // Checksum verified successfully.
+
+                // --- 3. Handle Zipping (if requested) ---
+                string finalTempPath = mergedFilePath;
+                string finalFileName = safeOriginalFileName;
+                string zipPassword = null;
+
+                if (createZip)
+                {
+                    finalFileName = Path.GetFileNameWithoutExtension(safeOriginalFileName) + ".zip";
+                    zipPassword = GeneratePassword();
+                    string zipStagingPath = Path.Combine(mergeDir, finalFileName);
+
+                    var zipper = new Cli7ZipProcess(); // Assuming this class exists and works.
+                    Action<int> progressCallback = delegate(int percent)
+                    {
+                        // Zipping accounts for progress from 76% to 99%
+                        info.Progress = 75 + (int)Math.Floor(percent * 0.24); // 75 + (percent * 0.24) maps 0-100 to 75-99
+                    };
+
+                    await zipper.CompressFileAsync(mergedFilePath, zipStagingPath, zipPassword, progressCallback);
+                    finalTempPath = zipStagingPath;
+                }
+
+                // --- 4. Determine final, unique destination path ---
+                string finalDestPath = Path.Combine(_finalUploadPath, finalFileName);
+                int count = 1;
+                string fileNameOnly = Path.GetFileNameWithoutExtension(finalDestPath);
+                string extension = Path.GetExtension(finalDestPath);
+                while (System.IO.File.Exists(finalDestPath))
+                {
+                    finalFileName = string.Format("{0}({1}){2}", fileNameOnly, count++, extension);
+                    finalDestPath = Path.Combine(_finalUploadPath, finalFileName);
+                }
+
+                // --- 5. Move file to its final destination ---
+                System.IO.File.Move(finalTempPath, finalDestPath);
+                if (createZip && !string.Equals(mergedFilePath, finalTempPath))
+                {
+                    System.IO.File.Delete(mergedFilePath); // Clean up the pre-zip file
+                }
+
+                // --- 6. Create the database record ONLY after all file operations succeed ---
+                using (var context = new CloudStorageDbContext())
+                {
+                    var newFile = new BOBDrive.Models.File
+                    {
+                        FileIdForUpload = fileIdForUpload,
+                        Name = finalFileName,
+                        ContentType = createZip ? "application/zip" : fileContentType,
+                        Size = new FileInfo(finalDestPath).Length,
+                        FilePath = finalDestPath,
+                        FolderId = folderId,
+                        UploadedAt = DateTime.UtcNow,
+                        IsProcessing = false,
+                        ProcessingProgress = 100,
+                        ZipPassword = zipPassword
+                    };
+                    context.Files.Add(newFile);
+
+                    var chunksToDelete = context.FileChunks.Where(fc => fc.FileIdForUpload == fileIdForUpload);
+                    context.FileChunks.RemoveRange(chunksToDelete);
+                    await context.SaveChangesAsync();
+                }
+
+                // --- 7. Finalize progress for the client ---
+                info.FileName = finalFileName;
+                info.Progress = 100;
+                info.IsDone = true;
+            }
+            catch (Exception ex)
+            {
+                // If any error occurs, report it to the client via the progress tracker
+                info.Progress = -1;
+                info.ErrorMessage = string.Format("Server processing error: {0}", ex.Message);
+            }
+            finally
+            {
+                // --- 8. Robustly clean up all temporary files and directories ---
+                try
+                {
+                    if (Directory.Exists(chunkDir)) Directory.Delete(chunkDir, true);
+                    if (Directory.Exists(mergeDir)) Directory.Delete(mergeDir, true);
+                }
+                catch
+                {
+                    // Best effort cleanup. Log these errors for maintenance if needed.
+                }
+            }
+        }
+
+        /// <summary>
+        /// Pollable endpoint for the client to get progress on the finalization.
+        /// Returns progress, isDone, fileName, or error message if progress < 0.
+        /// </summary>
+        [HttpGet]
+        public async Task<JsonResult> GetFinalizationProgress(string fileIdForUpload)
+        {
+            if (string.IsNullOrEmpty(fileIdForUpload))
+            {
+                return Json(new { success = false, message = "File ID is missing." }, JsonRequestBehavior.AllowGet);
+            }
+
+            // First check in-memory tracker for detailed error message if any
+            ProgressInfo info;
+            if (UploadProgressTracker.TryGet(fileIdForUpload, out info))
+            {
+                if (info.Progress < 0)
+                {
+                    return Json(new
+                    {
+                        success = true,
+                        progress = -1,
+                        message = info.ErrorMessage
+                    }, JsonRequestBehavior.AllowGet);
+                }
+                if (info.IsDone)
+                {
+                    return Json(new
+                    {
+                        success = true,
+                        progress = 100,
+                        isDone = true,
+                        fileName = info.FileName
+                    }, JsonRequestBehavior.AllowGet);
+                }
+                // Otherwise, return current in-memory progress
+                return Json(new
+                {
+                    success = true,
+                    progress = info.Progress,
+                    isDone = false
+                }, JsonRequestBehavior.AllowGet);
+            }
+
+            // Fallback: check database
+            try
+            {
+                var fileRecord = await db.Files.FirstOrDefaultAsync(f => f.FileIdForUpload == fileIdForUpload);
+                if (fileRecord == null)
+                {
+                    return Json(new { success = false, message = "Could not find a matching file record." }, JsonRequestBehavior.AllowGet);
+                }
+                // If ProcessingProgress < 0, treat as error
+                if (fileRecord.ProcessingProgress < 0)
+                {
+                    return Json(new
+                    {
+                        success = true,
+                        progress = -1,
+                        message = "Server processing error."
+                    }, JsonRequestBehavior.AllowGet);
+                }
+                return Json(new
+                {
+                    success = true,
+                    progress = fileRecord.ProcessingProgress,
+                    isDone = !fileRecord.IsProcessing,
+                    fileName = fileRecord.IsProcessing ? null : fileRecord.Name
+                }, JsonRequestBehavior.AllowGet);
+            }
+            catch (Exception ex)
+            {
+                // Log exception
+                return Json(new { success = false, message = "An error occurred: " + ex.Message }, JsonRequestBehavior.AllowGet);
+            }
+        }
+
+        // GET: /File/Download/5
+        public async Task<ActionResult> Download(int id)
+        {
+            var fileRecord = await db.Files.FindAsync(id);
+            if (fileRecord == null || fileRecord.IsProcessing)
+            {
+                return HttpNotFound("File not found or is currently being processed.");
+            }
+
+            var filePath = fileRecord.FilePath;
+            if (!System.IO.File.Exists(filePath))
+            {
+                return HttpNotFound("Physical file not found on server.");
+            }
+
+            FileInfo fileInfo = new FileInfo(filePath);
+            long totalFileSize = fileInfo.Length;
+            string rangeHeader = Request.Headers["Range"];
+
+            Response.Clear();
+            Response.BufferOutput = false;
+            if (string.IsNullOrWhiteSpace(rangeHeader))
+            {
+                // Full download
+                Response.StatusCode = (int)HttpStatusCode.OK;
+                Response.AppendHeader("Accept-Ranges", "bytes");
+                Response.AppendHeader("Content-Disposition", new System.Net.Mime.ContentDisposition { FileName = fileRecord.Name, Inline = false }.ToString());
+                Response.ContentType = fileRecord.ContentType;
+                Response.AppendHeader("Content-Length", totalFileSize.ToString());
+                using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536, useAsync: true))
+                {
+                    await fileStream.CopyToAsync(Response.OutputStream);
+                }
+            }
+            else
+            {
+                // Partial (Range) download
+                try
+                {
+                    long start = 0, end = 0;
+                    var rangeParts = rangeHeader.Replace("bytes=", "").Split('-');
+                    string startStr = rangeParts[0];
+                    string endStr = (rangeParts.Length > 1) ? rangeParts[1] : null;
+                    if (string.IsNullOrWhiteSpace(startStr))
+                    {
+                        long suffixLength;
+                        if (string.IsNullOrWhiteSpace(endStr) || !long.TryParse(endStr, out suffixLength) || suffixLength <= 0)
+                            throw new FormatException("Invalid suffix length format.");
+                        start = Math.Max(0, totalFileSize - suffixLength);
+                        end = totalFileSize - 1;
+                    }
+                    else
+                    {
+                        if (!long.TryParse(startStr, out start) || start < 0)
+                            throw new FormatException("Invalid start range format.");
+                        if (string.IsNullOrWhiteSpace(endStr))
+                            end = totalFileSize - 1;
+                        else if (!long.TryParse(endStr, out end) || end < 0)
+                            throw new FormatException("Invalid end range format.");
+                    }
+                    if (end >= totalFileSize) end = totalFileSize - 1;
+                    if (start > end || start >= totalFileSize)
+                    {
+                        Response.StatusCode = (int)HttpStatusCode.RequestedRangeNotSatisfiable;
+                        Response.AppendHeader("Content-Range", string.Format("bytes */{0}", totalFileSize));
+                    }
+                    else
+                    {
+                        long bytesToRead = (end - start) + 1;
+                        Response.StatusCode = (int)HttpStatusCode.PartialContent;
+                        Response.AppendHeader("Accept-Ranges", "bytes");
+                        Response.AppendHeader("Content-Range", string.Format("bytes {0}-{1}/{2}", start, end, totalFileSize));
+                        Response.ContentType = fileRecord.ContentType;
+                        Response.AppendHeader("Content-Disposition", new System.Net.Mime.ContentDisposition { FileName = fileRecord.Name, Inline = false }.ToString());
+                        Response.AppendHeader("Content-Length", bytesToRead.ToString());
+                        using (var fileStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 65536, useAsync: true))
+                        {
+                            fileStream.Seek(start, SeekOrigin.Begin);
+                            byte[] buffer = new byte[65536];
+                            long currentBytesSent = 0;
+                            while (currentBytesSent < bytesToRead)
+                            {
+                                if (!Response.IsClientConnected) break;
+                                int bytesToReadFromStream = (int)Math.Min(bytesToRead - currentBytesSent, buffer.Length);
+                                int actualRead = await fileStream.ReadAsync(buffer, 0, bytesToReadFromStream);
+                                if (actualRead == 0) break;
+                                await Response.OutputStream.WriteAsync(buffer, 0, actualRead);
+                                currentBytesSent += actualRead;
+                            }
+                        }
+                    }
+                }
+                catch (FormatException ex)
+                {
+                    if (!Response.HeadersWritten)
+                    {
+                        Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                        Response.StatusDescription = "Malformed Range header: " + ex.Message;
+                    }
+                }
+                catch (Exception)
+                {
+                    if (!Response.HeadersWritten)
+                    {
+                        Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+                        Response.StatusDescription = "Error processing file stream.";
+                    }
+                }
+            }
+            return new EmptyResult();
+        }
+
+        // Helper method to compute SHA-256 checksum for a file (not used in browser-based streaming, but kept if needed)
+        private string ComputeSha256(string filePath)
+        {
+            using (var sha256 = SHA256.Create()) // Use SHA256.Create() for clarity
+            {
+                // Open the file with a buffer that matches the one used for writing, for consistency.
+                using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true))
+                {
+                    var hash = sha256.ComputeHash(stream);
+                    var sb = new StringBuilder(hash.Length * 2);
+                    foreach (byte b in hash)
+                    {
+                        sb.Append(b.ToString("x2"));
+                    }
+                    return sb.ToString();
+                }
+            }
+        }
+
+        // Helper method to generate a random password for ZIP files.
+        private string GeneratePassword()
+        {
+            const string validChars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";
+            var builder = new StringBuilder();
+            using (var rng = new RNGCryptoServiceProvider())
+            {
+                byte[] uintBuffer = new byte[sizeof(uint)];
+                for (int i = 0; i < 12; i++) // Create a 12-character password
+                {
+                    rng.GetBytes(uintBuffer);
+                    uint num = BitConverter.ToUInt32(uintBuffer, 0);
+                    builder.Append(validChars[(int)(num % (uint)validChars.Length)]);
+                }
+            }
+            return builder.ToString();
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+@model BOBDrive.ViewModels.FolderViewModel
+
+@{
+    ViewBag.Title = "My BOB Drive";
+}
+
+<div class="modal fade" id="createFolderModal" tabindex="-1" role="dialog" aria-labelledby="createFolderModalLabel">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                <h4 class="modal-title" id="createFolderModalLabel">Create New Folder</h4>
+            </div>
+            <div class="modal-body">
+                <form id="createFolderForm" onsubmit="return false;">
+                    <div class="form-group">
+                        <label for="newFolderName">Folder Name</label>
+                        <input type="text" id="newFolderName" class="form-control" placeholder="Enter folder name" required>
+                    </div>
+                    <div id="createFolderError" class="text-danger" style="margin-top:10px;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="createFolderBtnModal">Create</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="shareModal" tabindex="-1" role="dialog" aria-labelledby="shareModalLabel">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                <h4 class="modal-title" id="shareModalLabel">Share File: <strong id="shareModalFileName"></strong></h4>
+            </div>
+            <div class="modal-body">
+                <form id="shareLinkForm" onsubmit="return false;">
+                    @Html.AntiForgeryToken()
+                    <input type="hidden" id="shareFileIdModal" name="FileId" />
+
+                    <div class="form-group">
+                        <label for="sharePasswordModal">Optional: Protect the link with a separate password</label>
+                        <input type="password" id="sharePasswordModal" class="form-control" placeholder="Leave blank for no link password" />
+                    </div>
+
+                    <div id="shareLinkPasswordInfo" class="alert alert-info" style="display:none;">
+                        <strong>This is a zipped file.</strong> The password to open the file is:
+                        <div class="input-group" style="margin-top:5px;">
+                            <input type="text" class="form-control" id="shareLinkPasswordText" readonly style="background:white;" />
+                            <span class="input-group-btn">
+                                <button class="btn btn-default copy-password-btn" type="button" title="Copy Password">
+                                    <i class="glyphicon glyphicon-copy"></i>
+                                </button>
+                            </span>
+                        </div>
+                    </div>
+
+                    <div id="shareError" class="text-danger" style="margin-top:10px;"></div>
+
+                    <div id="generatedLinkContainer" style="display: none; margin-top: 15px;">
+                        <label>Generated Link:</label>
+                        <div class="input-group">
+                            <input type="text" id="generatedLinkText" class="form-control" readonly />
+                            <span class="input-group-btn">
+                                <button class="btn btn-default" type="button" id="copyLinkBtn">Copy</button>
+                            </span>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" id="createShareLinkBtnModal">Create Link</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="container" style="margin-top:20px;">
+    <h2>@ViewBag.Title</h2>
+    <hr />
+
+    <div class="panel panel-default">
+        <div class="panel-body">
+            <div class="row">
+                <div class="col-sm-8">
+                    <form id="chunkUploadForm" onsubmit="return false;">
+                        <input type="hidden" id="uploadFolderId" name="folderId" value="@Model.CurrentFolder.Id" />
+                        <div class="form-group">
+                            <label for="fileInput">Select a file to upload</label>
+                            <p class="text-muted">Upload destination: <strong id="uploadFolderName">@Model.CurrentFolder.Name</strong></p>
+                            <div class="input-group">
+                                <input type="file" name="file" id="fileInput" class="form-control" required />
+                                <span class="input-group-btn">
+                                    <button type="button" id="uploadButton" class="btn btn-success">
+                                        <i class="glyphicon glyphicon-upload"></i> Upload
+                                    </button>
+                                </span>
+                            </div>
+                            <div class="checkbox" style="margin-top: 10px;">
+                                <label>
+                                    <input type="checkbox" id="zipFileCheckbox"> Create a password-protected ZIP archive
+                                </label>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="col-sm-4 text-right">
+                    <label>Folder Actions</label>
+                    <br />
+                    <button type="button" id="createFolderButton" class="btn btn-primary">
+                        <i class="glyphicon glyphicon-plus"></i> Create Folder
+                    </button>
+                </div>
+            </div>
+
+            <div id="uploadProgressContainer" style="display:none; margin-top:15px;">
+                <p><strong>File:</strong> <span id="uploadFileName"></span></p>
+                <!-- Main overall progress bar -->
+                <div class="progress">
+                    <div id="uploadProgressBar"
+                         class="progress-bar progress-bar-striped active"
+                         role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="width:0%">
+                        0%
+                    </div>
+                </div>
+                <div id="uploadStatusAlert" class="alert" style="margin-top: 10px; padding: 10px;"></div>
+
+                <!-- Controls: Pause / Resume / Retry / Cancel -->
+                <div id="uploadControls" style="margin-top: 10px;">
+                    <button type="button" id="pauseButton" class="btn btn-warning" style="display:none;">
+                        <i class="glyphicon glyphicon-pause"></i> Pause
+                    </button>
+                    <button type="button" id="resumeButton" class="btn btn-info" style="display:none;">
+                        <i class="glyphicon glyphicon-play"></i> Resume
+                    </button>
+                    <button type="button" id="retryButton" class="btn btn-primary" style="display:none;">
+                        <i class="glyphicon glyphicon-repeat"></i> Retry
+                    </button>
+                    <button type="button" id="cancelButton" class="btn btn-danger" style="display:none;">
+                        <i class="glyphicon glyphicon-remove"></i> Cancel
+                    </button>
+                </div>
+
+                <!-- NEW: Finalization progress section -->
+                <div id="finalizationProgressContainer" style="display:none; margin-top:15px;">
+                    <p><strong>Finalization Progress:</strong></p>
+                    <!-- Merge stage bar -->
+                    <div class="progress">
+                        <div id="mergeProgressBar"
+                             class="progress-bar progress-bar-info"
+                             role="progressbar" aria-valuemin="0" aria-valuemax="100" style="width:0%">
+                            Merge: 0%
+                        </div>
+                    </div>
+                    <!-- Zip stage bar; displayed only when ZIP is selected -->
+                    <div id="zipStageContainer" style="display:none; margin-top:5px;">
+                        <div class="progress">
+                            <div id="zipProgressBar"
+                                 class="progress-bar progress-bar-info"
+                                 role="progressbar" aria-valuemin="0" aria-valuemax="100" style="width:0%">
+                                Zip: 0%
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="folderContentsWrapper">
+        @{ Html.RenderAction("GetFolderContents", "File", new { folderId = Model.CurrentFolder.Id }); }
+    </div>
+</div>
+
+<!-- Include CryptoJS locally; ensure ~/Scripts/crypto-js.min.js exists -->
+<script src="@Url.Content("~/Scripts/crypto-js.min.js")"></script>
+
+@section scripts {
+    <script type="text/javascript">
+        $(document).ready(function () {
+            // --- VARIABLES ---
+            var CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB
+            // *** UI STATE FIX: Added PREPARING state ***
+            var UPLOAD_STATE = {
+                IDLE: 0,
+                PREPARING: 0.5, // New state for checksum calculation
+                UPLOADING: 1,
+                PAUSED: 2,
+                FINALIZING: 3,
+                ERROR: 4,
+                CANCELLING: 5,
+                DONE: 6
+            };
+            var chunkRetryAttempts = 0;
+            var MAX_CHUNK_RETRIES = 3;
+            var currentState = UPLOAD_STATE.IDLE;
+            var currentChunk = 0, totalChunks = 0, fileIdForUpload = null, folderId = null;
+            var fileObj = null, totalFileSize = 0, fileContentType = null;
+            var originalFileChecksum = null;
+            var createZip = false;
+            var finalizationPoller = null;
+            var progressHistory = [];
+            var ETR_SMOOTHING_FACTOR = 5;
+            // jQuery selectors
+            var $fileInput = $("#fileInput");
+            var $uploadButton = $("#uploadButton");
+            var $createFolderButton = $("#createFolderButton");
+            var $pauseButton = $("#pauseButton");
+            var $resumeButton = $("#resumeButton");
+            var $retryButton = $("#retryButton");
+            var $cancelButton = $("#cancelButton");
+            var $progressContainer = $("#uploadProgressContainer");
+            var $progressBar = $("#uploadProgressBar");
+            var $uploadStatusAlert = $("#uploadStatusAlert");
+            var $uploadFileName = $("#uploadFileName");
+            var $uploadFolderId = $("#uploadFolderId");
+            var $uploadFolderName = $("#uploadFolderName");
+            var $finalizationContainer = $("#finalizationProgressContainer");
+            var $mergeBar = $("#mergeProgressBar");
+            var $zipStageContainer = $("#zipStageContainer");
+            var $zipBar = $("#zipProgressBar");
+
+
+            // --- NEW: Helper function to calculate checksum for a single blob/chunk ---
+            function calculateChecksumForBlob(blob) {
+                return new Promise(function (resolve, reject) {
+                    var reader = new FileReader();
+                    reader.onload = function (e) {
+                        try {
+                            var wordArray = CryptoJS.lib.WordArray.create(e.target.result);
+                            // Use the direct hashing method for single chunks, which is faster.
+                            var hash = CryptoJS.SHA256(wordArray);
+                            resolve(hash.toString(CryptoJS.enc.Hex));
+                        } catch (ex) {
+                            reject("Error calculating chunk checksum: " + ex);
+                        }
+                    };
+                    reader.onerror = function (err) {
+                        reject("Error reading blob for checksum: " + err);
+                    };
+                    reader.readAsArrayBuffer(blob);
+                });
+            }
+
+
+
+            // --- HELPER FUNCTIONS ---
+            function calculateChecksumStreaming(file, onProgress) {
+                return new Promise(function (resolve, reject) {
+                    var chunkSizeLocal = 5 * 1024 * 1024; // 5 MB
+                    var totalChunksLocal = Math.ceil(file.size / chunkSizeLocal);
+                    var currentChunkLocal = 0;
+                    var sha256Hasher = CryptoJS.algo.SHA256.create();
+                    var fileReader = new FileReader();
+
+                    fileReader.onload = function (e) {
+                        var wordArray = CryptoJS.lib.WordArray.create(e.target.result);
+                        sha256Hasher.update(wordArray);
+                        currentChunkLocal++;
+                        if (typeof onProgress === "function") {
+                            var pct = Math.round((currentChunkLocal / totalChunksLocal) * 100);
+                            onProgress(pct);
+                        }
+                        if (currentChunkLocal < totalChunksLocal) {
+                            readNextChunk();
+                        } else {
+                            try {
+                                var hash = sha256Hasher.finalize();
+                                resolve(hash.toString(CryptoJS.enc.Hex));
+                            } catch (ex) {
+                                reject("Error finalizing checksum: " + ex);
+                            }
+                        }
+                    };
+
+                    fileReader.onerror = function (err) {
+                        console.error("Error reading file chunk for checksum:", err);
+                        reject("Error reading file for checksum calculation.");
+                    };
+
+                    function readNextChunk() {
+                        var offset = currentChunkLocal * chunkSizeLocal;
+                        var slice = file.slice(offset, offset + chunkSizeLocal);
+                        fileReader.readAsArrayBuffer(slice);
+                    }
+
+                    if (typeof onProgress === "function") {
+                        onProgress(0);
+                    }
+                    readNextChunk();
+                });
+            }
+
+            function calculateETR() {
+                if (progressHistory.length < 2) {
+                    return "(ETR: calculating...)";
+                }
+                var first = progressHistory[0];
+                var last = progressHistory[progressHistory.length - 1];
+                var progressDelta = last.progress - first.progress;
+                var timeDelta = (last.time - first.time) / 1000;
+                if (progressDelta <= 0 || timeDelta <= 0) {
+                    return "(ETR: calculating...)";
+                }
+                var rate = progressDelta / timeDelta;
+                var remainingProgress = 100 - last.progress;
+                var remainingSeconds = Math.round(remainingProgress / rate);
+                if (remainingSeconds < 0 || remainingSeconds > 3600 * 2) {
+                    return "(ETR: calculating...)";
+                }
+                if (remainingSeconds < 60) {
+                    return "(ETR: about " + remainingSeconds + " seconds)";
+                } else {
+                    return "(ETR: about " + Math.ceil(remainingSeconds / 60) + " minutes)";
+                }
+            }
+
+            function handleError(message, allowRetry) {
+                clearInterval(finalizationPoller);
+                finalizationPoller = null;
+                currentState = UPLOAD_STATE.ERROR;
+                updateStatus((currentChunk / totalChunks) * 100, message, 'danger');
+                $retryButton.toggle(allowRetry !== false);
+                $pauseButton.hide();
+                $resumeButton.hide();
+                updateButtonStates();
+                updateInteractionLock();
+            }
+
+            function resetUploadUI() {
+                currentState = UPLOAD_STATE.IDLE;
+                fileObj = null;
+                fileIdForUpload = null;
+                originalFileChecksum = null;
+                progressHistory = [];
+                $fileInput.val('');
+                $progressContainer.hide();
+                updateProgressBar(0);
+                // Hide finalization UI
+                $finalizationContainer.hide();
+                resetStageBars();
+                updateButtonStates();
+                updateInteractionLock();
+                clearInterval(finalizationPoller);
+                finalizationPoller = null;
+            }
+
+            function updateProgressBar(percentage, useSpinner) {
+                percentage = Math.floor(percentage);
+                $progressBar.css("width", percentage + "%").attr("aria-valuenow", percentage).text(percentage + "%");
+                if (useSpinner === true) {
+                    $progressBar.addClass("progress-bar-striped active");
+                } else {
+                    $progressBar.removeClass("progress-bar-striped active");
+                }
+                if (percentage >= 100) {
+                    $progressBar.removeClass("progress-bar-info").addClass("progress-bar-success");
+                } else {
+                    $progressBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                }
+            }
+
+            function updateStatus(percentage, text, alertType, useSpinner) {
+                updateProgressBar(percentage, useSpinner);
+                $uploadStatusAlert.html(text || "");
+                $uploadStatusAlert
+                    .removeClass('alert-info alert-success alert-warning alert-danger')
+                    .addClass('alert-' + (alertType || 'info'));
+            }
+
+            function updateButtonStates() {
+                var isIdle = currentState === UPLOAD_STATE.IDLE;
+                var isUploading = currentState === UPLOAD_STATE.UPLOADING;
+                var isPaused = currentState === UPLOAD_STATE.PAUSED;
+                var isError = currentState === UPLOAD_STATE.ERROR;
+                var isPreparing = currentState === UPLOAD_STATE.PREPARING;
+
+                $fileInput.prop("disabled", !isIdle);
+                $uploadButton.prop("disabled", !isIdle);
+
+                // Only show Pause button if actually uploading, not while preparing
+                $pauseButton.toggle(isUploading);
+                $resumeButton.toggle(isPaused);
+                $retryButton.toggle(isError);
+
+                // Show Cancel button if preparing, uploading, paused, error, or finalizing
+                var canCancel = isPreparing || isUploading || isPaused || isError || (currentState === UPLOAD_STATE.FINALIZING);
+                $cancelButton.toggle(canCancel);
+            }
+
+            function updateInteractionLock() {
+                var isLocked = (currentState !== UPLOAD_STATE.IDLE && currentState !== UPLOAD_STATE.DONE);
+                $createFolderButton.prop("disabled", isLocked);
+                var folderRows = $("#folderContentsWrapper").find(".folder-row");
+                if (isLocked) {
+                    folderRows.addClass("disabled-row").css("cursor", "not-allowed");
+                } else {
+                    folderRows.removeClass("disabled-row").css("cursor", "pointer");
+                }
+            }
+
+            function generateGuid() {
+                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+                    var r = (new Date().getTime() + Math.random() * 16) % 16 | 0;
+                    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+                });
+            }
+
+            // Reset the merge and zip sub-bars
+            function resetStageBars() {
+                $mergeBar.css("width", "0%").attr("aria-valuenow", 0).text("Merge: 0%");
+                $mergeBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                $zipBar.css("width", "0%").attr("aria-valuenow", 0).text("Zip: 0%");
+                $zipBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                $zipStageContainer.hide();
+            }
+
+            // --- CORE UPLOAD LOGIC ---
+            function startUpload() {
+                fileContentType = fileObj.type || "application/octet-stream";
+                totalChunks = Math.ceil(totalFileSize / CHUNK_SIZE);
+                fileIdForUpload = generateGuid();
+                folderId = $uploadFolderId.val();
+                currentChunk = 0;
+
+                // 1. Set state to PREPARING first
+                currentState = UPLOAD_STATE.PREPARING;
+                createZip = $("#zipFileCheckbox").prop("checked");
+
+                $uploadFileName.text(fileObj.name);
+                $progressContainer.show();
+                updateButtonStates();
+                updateInteractionLock();
+
+                $finalizationContainer.hide();
+                resetStageBars();
+
+                // 2. Start checksum calculation
+                updateStatus(0, 'Calculating file checksum for integrity check... 0%', 'info', true);
+                calculateChecksumStreaming(fileObj, function (pct) {
+                    updateStatus(pct, 'Calculating file checksum for integrity check... ' + pct + '%', 'info', true);
+                }).then(function (hashHex) {
+                    originalFileChecksum = hashHex;
+
+                    // 3. Check disk space
+                    $.post(
+                        '@Url.Action("CheckDiskSpace", "File")',
+                        { totalFileSize: totalFileSize },
+                        function (response) {
+                            if (response.success) {
+                                // 4. Set state to UPLOADING only after checksum and disk check are done
+                                currentState = UPLOAD_STATE.UPLOADING;
+                                updateButtonStates(); // Update buttons again before starting chunk upload
+                                uploadNextChunk();
+                            } else {
+                                handleError("Disk space check failed: " + response.message, false);
+                            }
+                        }
+                    ).fail(function () {
+                        handleError("Could not contact server to check disk space.", false);
+                    });
+                }).catch(function (err) {
+                    console.error("Checksum calculation failed:", err);
+                    handleError("Could not calculate file checksum. Please try again.", false);
+                });
+            }
+
+            // NEW VERSION of uploadNextChunk
+            function uploadNextChunk() {
+                if (currentState !== UPLOAD_STATE.UPLOADING) {
+                    return;
+                }
+                if (currentChunk >= totalChunks) {
+                    startFinalization();
+                    return;
+                }
+
+                var start = currentChunk * CHUNK_SIZE;
+                var end = Math.min(start + CHUNK_SIZE, totalFileSize);
+                var chunkBlob = fileObj.slice(start, end);
+
+                // --- NEW: Calculate checksum for the chunk before uploading ---
+                calculateChecksumForBlob(chunkBlob).then(function (chunkChecksum) {
+
+                    var formData = new FormData();
+                    formData.append("chunk", chunkBlob, fileObj.name + ".chunk" + currentChunk);
+                    formData.append("fileIdForUpload", fileIdForUpload);
+                    formData.append("chunkNumber", currentChunk);
+                    formData.append("totalChunks", totalChunks);
+                    formData.append("originalFileName", fileObj.name);
+                    formData.append("folderId", folderId);
+                    formData.append("totalFileSize", totalFileSize);
+                    formData.append("fileContentType", fileContentType);
+                    formData.append("chunkChecksum", chunkChecksum); // <-- Append the new checksum
+
+                    var percentage = (currentChunk / totalChunks) * 100;
+                    updateStatus(percentage, "Uploading chunk " + (currentChunk + 1) + " of " + totalChunks + "...", 'info');
+
+                    $.ajax({
+                        url: '@Url.Action("UploadChunk", "File")',
+                        type: "POST",
+                        data: formData,
+                        processData: false,
+                        contentType: false,
+                        success: function (response) {
+                            if (response.success) {
+                                chunkRetryAttempts = 0; // Reset retry counter on success
+                                currentChunk++;
+                                uploadNextChunk();
+                            } else if (response.retry) {
+                                // --- NEW: Handle specific retry request from server ---
+                                chunkRetryAttempts++;
+                                if (chunkRetryAttempts > MAX_CHUNK_RETRIES) {
+                                    handleError("Chunk upload failed after " + MAX_CHUNK_RETRIES + " attempts. Please cancel and try again.", true);
+                                } else {
+                                    updateStatus(percentage, response.message, 'warning');
+                                    // Wait 1 second before retrying the same chunk
+                                    setTimeout(uploadNextChunk, 1000);
+                                }
+                            } else {
+                                handleError("Error on chunk " + (currentChunk + 1) + ": " + response.message, true);
+                            }
+                        },
+                        error: function (xhr, status, err) {
+                            handleError("Network error on chunk " + (currentChunk + 1) + ": " + err, true);
+                        }
+                    });
+
+                }).catch(function (err) {
+                    // Handle error during chunk checksum calculation
+                    handleError("Could not calculate chunk checksum. Error: " + err, false);
+                });
+            }
+
+            function startFinalization() {
+                currentState = UPLOAD_STATE.FINALIZING;
+                updateStatus(100, "All chunks sent. Finalizing file on server...", 'info', true);
+                updateButtonStates();
+                updateInteractionLock();
+
+                // Show finalization UI
+                $finalizationContainer.show();
+                // Show merge bar; zip bar only if createZip
+                $mergeBar.text("Merge: 0%");
+                $mergeBar.css("width", "0%").attr("aria-valuenow", 0);
+                if (createZip) {
+                    $zipStageContainer.show();
+                    $zipBar.text("Zip: 0%");
+                    $zipBar.css("width", "0%").attr("aria-valuenow", 0);
+                } else {
+                    $zipStageContainer.hide();
+                }
+
+                $.ajax({
+                    url: '@Url.Action("StartFinalization", "File")',
+                    type: "POST",
+                    data: {
+                        fileIdForUpload: fileIdForUpload,
+                        originalFileName: fileObj.name,
+                        folderId: folderId,
+                        totalFileSize: totalFileSize,
+                        fileContentType: fileContentType,
+                        createZip: createZip,
+                        originalFileChecksum: originalFileChecksum
+                    },
+                    success: function (response) {
+                        if (response.success && response.action === "poll") {
+                            updateStatus(0, "Processing file on server...", 'info', true);
+                            progressHistory = [];
+                            finalizationPoller = setInterval(pollFinalizationProgress, 2000);
+                        } else {
+                            handleError("Could not start finalization: " + (response.message || "Unknown error"), true);
+                        }
+                    },
+                    error: function (xhr, status, err) {
+                        handleError("Server error starting finalization: " + err, true);
+                    }
+                });
+            }
+
+            function pollFinalizationProgress() {
+                $.ajax({
+                    url: '@Url.Action("GetFinalizationProgress", "File")',
+                    type: "GET",
+                    data: { fileIdForUpload: fileIdForUpload },
+                    success: function (response) {
+                        if (response.success) {
+                            if (response.progress < 0) {
+                                handleError("An error occurred on the server during file processing. The file's contents may be corrupt. Please try uploading again.", true);
+                                return;
+                            }
+                            // Record history for ETR
+                            progressHistory.push({ time: Date.now(), progress: response.progress });
+                            if (progressHistory.length > ETR_SMOOTHING_FACTOR) {
+                                progressHistory.shift();
+                            }
+                            var etrString = calculateETR();
+                            // Update main status text
+                            updateStatus(response.progress, (createZip
+                                ? (response.progress <= 50
+                                    ? "Stage 1 of 2: Merging & Verifying... "
+                                    : "Stage 2 of 2: Creating ZIP archive... ")
+                                : "Merging chunks... ") + etrString, 'info', true);
+
+                            // Update stage bars
+                            if (createZip) {
+                                // Merge stage: 0–50 maps to 0–100% of merge bar
+                                var mergePct = Math.min(response.progress, 50) / 50 * 100;
+                                mergePct = Math.floor(mergePct);
+                                $mergeBar.css("width", mergePct + "%").attr("aria-valuenow", mergePct).text("Merge: " + mergePct + "%");
+                                if (mergePct >= 100) {
+                                    $mergeBar.removeClass("progress-bar-info").addClass("progress-bar-success");
+                                } else {
+                                    $mergeBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                                }
+                                // Zip stage: when progress>50, map (progress-50)/50*100
+                                if (response.progress > 50) {
+                                    var zipPct = (response.progress - 50) / 50 * 100;
+                                    zipPct = Math.floor(zipPct);
+                                    $zipBar.css("width", zipPct + "%").attr("aria-valuenow", zipPct).text("Zip: " + zipPct + "%");
+                                    if (zipPct >= 100) {
+                                        $zipBar.removeClass("progress-bar-info").addClass("progress-bar-success");
+                                    } else {
+                                        $zipBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                                    }
+                                } else {
+                                    // Before zip starts, keep zip bar at 0
+                                    $zipBar.css("width", "0%").attr("aria-valuenow", 0).text("Zip: 0%");
+                                    $zipBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                                }
+                            } else {
+                                // Non-zip: use merge bar for entire 0–100
+                                var mergePct2 = response.progress;
+                                mergePct2 = Math.floor(mergePct2);
+                                $mergeBar.css("width", mergePct2 + "%").attr("aria-valuenow", mergePct2).text("Merge: " + mergePct2 + "%");
+                                if (mergePct2 >= 100) {
+                                    $mergeBar.removeClass("progress-bar-info").addClass("progress-bar-success");
+                                } else {
+                                    $mergeBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                                }
+                                $zipStageContainer.hide();
+                            }
+
+                            if (response.isDone) {
+                                clearInterval(finalizationPoller);
+                                finalizationPoller = null;
+                                currentState = UPLOAD_STATE.DONE;
+                                updateStatus(100, "Success! File '" + response.fileName + "' created.", 'success');
+                                setTimeout(function () {
+                                    resetUploadUI();
+                                    loadFolder(folderId);
+                                }, 2000);
+                            }
+                        } else {
+                            handleError("Error checking progress: " + response.message, true);
+                        }
+                    },
+                    error: function (xhr, status, err) {
+                        handleError("Network error while checking progress: " + err, true);
+                    }
+                });
+            }
+
+            // --- EVENT HANDLERS ---
+
+            $uploadButton.on("click", function () {
+                if ($fileInput[0].files.length === 0) {
+                    alert("Please select a file to upload.");
+                    return;
+                }
+                fileObj = $fileInput[0].files[0];
+                totalFileSize = fileObj.size;
+                startUpload();
+            });
+
+            $pauseButton.on("click", function () {
+                currentState = UPLOAD_STATE.PAUSED;
+                updateStatus((currentChunk / totalChunks) * 100, "Upload paused.", 'info');
+                updateButtonStates();
+            });
+
+            $resumeButton.on("click", function () {
+                currentState = UPLOAD_STATE.UPLOADING;
+                updateStatus((currentChunk / totalChunks) * 100, "Resuming upload...", 'info');
+                updateButtonStates();
+                uploadNextChunk();
+            });
+
+            $retryButton.on("click", function () {
+                var wasFinalizing = (currentState === UPLOAD_STATE.FINALIZING || (currentChunk >= totalChunks));
+                currentState = UPLOAD_STATE.UPLOADING;
+                updateButtonStates();
+                if (wasFinalizing) {
+                    startFinalization();
+                } else {
+                    uploadNextChunk();
+                }
+            });
+
+            $cancelButton.on("click", function () {
+                if (!fileIdForUpload) {
+                    resetUploadUI();
+                    return;
+                }
+                if (confirm("Are you sure you want to cancel this operation?")) {
+                    clearInterval(finalizationPoller);
+                    finalizationPoller = null;
+                    currentState = UPLOAD_STATE.CANCELLING;
+                    updateStatus((currentChunk / totalChunks) * 100, "Cancelling...", 'warning');
+                    updateButtonStates();
+                    updateInteractionLock();
+                    $.post(
+                        '@Url.Action("CancelUpload", "File")',
+                        { fileIdForUpload: fileIdForUpload }
+                    ).always(function () {
+                        resetUploadUI();
+                    });
+                }
+            });
+
+            $(window).on('beforeunload', function () {
+                if (currentState === UPLOAD_STATE.UPLOADING ||
+                    currentState === UPLOAD_STATE.FINALIZING ||
+                    currentState === UPLOAD_STATE.CANCELLING) {
+                    return 'An operation is in progress. Are you sure you want to leave? Changes will be lost.';
+                }
+            });
+
+            // --- FOLDER & MODAL LOGIC ---
+
+            function loadFolder(folderIdToLoad) {
+                $.get('@Url.Action("GetFolderContents", "File")', { folderId: folderIdToLoad },
+                    function (html) {
+                        $("#folderContentsWrapper").html(html);
+                        var newFolderName = $("#currentFolderNameFromPartial").val();
+                        $uploadFolderName.text(newFolderName || "My Drive");
+                        bindDynamicContentEvents();
+                    }
+                );
+            }
+
+            function bindCreateFolderEvents() {
+                $createFolderButton.off("click").on("click", function () {
+                    $("#newFolderName").val("");
+                    $("#createFolderError").text("").hide();
+                    $("#createFolderModal").modal("show");
+                });
+
+                $("#createFolderBtnModal").off("click").on("click", function () {
+                    var folderName = $("#newFolderName").val();
+                    var parentFolderId = $uploadFolderId.val();
+                    var $errorDiv = $("#createFolderError");
+                    if (!folderName || folderName.trim() === "") {
+                        $errorDiv.text("Folder name cannot be empty.").show();
+                        return;
+                    }
+                    $.ajax({
+                        url: '@Url.Action("CreateFolder", "File")',
+                        type: "POST",
+                        data: {
+                            folderName: folderName,
+                            parentFolderId: parentFolderId
+                        },
+                        success: function (response) {
+                            if (response.success) {
+                                $("#createFolderModal").modal("hide");
+                                loadFolder(parentFolderId);
+                            } else {
+                                $errorDiv.text(response.message || "An unknown error occurred.").show();
+                            }
+                        },
+                        error: function () {
+                            $errorDiv.text("A server error occurred. Please try again.").show();
+                        }
+                    });
+                });
+            }
+
+            function bindFolderNavigationEvents() {
+                $("#folderContentsWrapper").off("click", ".folder-row").on("click", ".folder-row", function () {
+                    if ($(this).hasClass("disabled-row")) {
+                        return;
+                    }
+                    var newFolderId = $(this).data("folderid");
+                    $uploadFolderId.val(newFolderId);
+                    loadFolder(newFolderId);
+                });
+            }
+
+            function bindShareModal() {
+                var $shareModal = $("#shareModal");
+                var $sharePassword = $("#sharePasswordModal");
+                var $shareFileIdHidden = $("#shareFileIdModal");
+                var $shareError = $("#shareError");
+                var $generatedLinkContainer = $("#generatedLinkContainer");
+                var $generatedLinkText = $("#generatedLinkText");
+
+                $("#folderContentsWrapper").off("click", ".share-link-btn").on("click", ".share-link-btn", function () {
+                    var fileId = $(this).data("fileid");
+                    var fileName = $(this).data("filename");
+                    var zipPassword = $(this).closest("tr").find(".zip-password-text").val();
+
+                    $shareFileIdHidden.val(fileId);
+                    $("#shareModalFileName").text(fileName);
+                    $sharePassword.val("");
+                    $shareError.text("");
+                    $generatedLinkContainer.hide();
+                    $generatedLinkText.val("");
+
+                    if (zipPassword) {
+                        $("#shareLinkPasswordInfo").show();
+                        $("#shareLinkPasswordText").val(zipPassword);
+                    } else {
+                        $("#shareLinkPasswordInfo").hide();
+                    }
+                    $shareModal.modal("show");
+                });
+
+                $("#createShareLinkBtnModal").off("click").on("click", function (e) {
+                    e.preventDefault();
+                    $shareError.text("");
+                    $generatedLinkContainer.hide();
+                    var token = $("#shareLinkForm input[name='__RequestVerificationToken']").val();
+                    var fileId = $shareFileIdHidden.val();
+                    var pwd = $sharePassword.val();
+                    $.ajax({
+                        url: '@Url.Action("Create", "ShareableLink")',
+                        type: "POST",
+                        data: { __RequestVerificationToken: token, FileId: fileId, Password: pwd },
+                        success: function (resp) {
+                            if (resp.success) {
+                                $generatedLinkText.val(resp.link);
+                                $generatedLinkContainer.show();
+                            } else {
+                                $shareError.text(resp.message || "Error creating link.");
+                            }
+                        },
+                        error: function (xhr, status, errorThrown) {
+                            $shareError.text("An unexpected error occurred: " + errorThrown);
+                        }
+                    });
+                });
+            }
+
+            function bindMiscEvents() {
+                $("#folderContentsWrapper, #shareModal").off("click", ".copy-password-btn").on("click", ".copy-password-btn", function () {
+                    var copyText = $(this).closest('.input-group').find('input[type="text"]')[0];
+                    copyText.select();
+                    document.execCommand("copy");
+                    var $btn = $(this);
+                    $btn.find('.glyphicon').removeClass('glyphicon-copy').addClass('glyphicon-ok');
+                    setTimeout(function () {
+                        $btn.find('.glyphicon').removeClass('glyphicon-ok').addClass('glyphicon-copy');
+                    }, 1500);
+                });
+
+                $("#shareModal").off("click", "#copyLinkBtn").on("click", "#copyLinkBtn", function () {
+                    var copyText = document.getElementById("generatedLinkText");
+                    copyText.select();
+                    document.execCommand("copy");
+                });
+            }
+
+            function bindDynamicContentEvents() {
+                bindFolderNavigationEvents();
+                bindShareModal();
+                bindMiscEvents();
+            }
+
+            // INITIALIZATION
+            bindDynamicContentEvents();
+            bindCreateFolderEvents();
+        });
+    </script>
+}
