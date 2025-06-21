@@ -1,0 +1,1225 @@
+//A -start
+
+
+@model BOBDrive.ViewModels.FolderViewModel
+
+@{
+    ViewBag.Title = "My BOB Drive";
+}
+
+<div class="modal fade" id="createFolderModal" tabindex="-1" role="dialog" aria-labelledby="createFolderModalLabel">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                <h4 class="modal-title" id="createFolderModalLabel">Create New Folder</h4>
+            </div>
+            <div class="modal-body">
+                <form id="createFolderForm" onsubmit="return false;">
+                    <div class="form-group">
+                        <label for="newFolderName">Folder Name</label>
+                        <input type="text" id="newFolderName" class="form-control" placeholder="Enter folder name" required>
+
+
+                    </div>
+                    <div id="createFolderError" class="text-danger" style="margin-top:10px;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn
+
+               btn-default" data-dismiss="modal">
+                    Cancel
+                </button>
+                <button type="button" class="btn btn-primary" id="createFolderBtnModal">Create</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="shareModal" tabindex="-1" role="dialog" aria-labelledby="shareModalLabel">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+
+                <h4 class="modal-title" id="shareModalLabel">Share File: <strong id="shareModalFileName"></strong></h4>
+            </div>
+            <div class="modal-body">
+                <form id="shareLinkForm" onsubmit="return false;">
+                    @Html.AntiForgeryToken()
+
+                    <input type="hidden" id="shareFileIdModal" name="FileId" />
+
+
+                    <div class="form-group">
+                        <label for="sharePasswordModal">Optional: Protect the link with a separate password</label>
+                        <input type="password" id="sharePasswordModal" class="form-control" placeholder="Leave blank for no link password" />
+
+
+                    </div>
+
+                    <div id="shareLinkPasswordInfo" class="alert alert-info" style="display:none;">
+                        <strong>This is a zipped file.</strong> The password to open the file is:
+                        <div class="input-group" style="margin-top:5px;">
+
+                            <input type="text" class="form-control" id="shareLinkPasswordText" readonly style="background:white;" />
+                            <span class="input-group-btn">
+                                <button class="btn btn-default copy-password-btn" type="button" title="Copy Password">
+
+
+                                    <i class="glyphicon glyphicon-copy"></i>
+                                </button>
+                            </span>
+                        </div>
+
+
+                    </div>
+
+                    <div id="shareError" class="text-danger" style="margin-top:10px;"></div>
+
+                    <div id="generatedLinkContainer" style="display: none; margin-top: 15px;">
+                        <label>Generated Link:</label>
+
+
+                        <div class="input-group">
+                            <input type="text" id="generatedLinkText" class="form-control" readonly />
+                            <span class="input-group-btn">
+
+
+                                <button class="btn btn-default" type="button" id="copyLinkBtn">Copy</button>
+                            </span>
+                        </div>
+                    </div>
+                </form>
+
+
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" id="createShareLinkBtnModal">Create Link</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="container" style="margin-top:20px;">
+    <h2>@ViewBag.Title</h2>
+    <hr />
+
+    <div class="panel
+
+   panel-default">
+        <div class="panel-body">
+            <div class="row">
+                <div class="col-sm-8">
+                    <form id="chunkUploadForm" onsubmit="return false;">
+                        <input type="hidden" id="uploadFolderId" name="folderId" value="@Model.CurrentFolder.Id" />
+
+
+                        <div class="form-group">
+                            <label for="fileInput">Select a file to upload</label>
+                            <p class="text-muted">Upload destination: <strong id="uploadFolderName">@Model.CurrentFolder.Name</strong></p>
+
+
+                            <div class="input-group">
+                                <input type="file" name="file" id="fileInput" class="form-control" required />
+                                <span class="input-group-btn">
+
+
+                                    <button type="button" id="uploadButton" class="btn btn-success">
+                                        <i class="glyphicon glyphicon-upload"></i> Upload
+
+
+                                    </button>
+                                </span>
+                            </div>
+                            <div class="checkbox" style="margin-top: 10px;">
+
+
+                                <label>
+                                    <input type="checkbox" id="zipFileCheckbox"> Create a password-protected ZIP archive
+
+                                </label>
+
+                            </div>
+                        </div>
+                    </form>
+                </div>
+
+
+                <div class="col-sm-4 text-right">
+                    <label>Folder Actions</label>
+                    <br />
+                    <button type="button" id="createFolderButton" class="btn btn-primary">
+                        <i class="glyphicon glyphicon-plus"></i> Create Folder
+
+                    </button>
+                </div>
+            </div>
+
+            <div id="uploadProgressContainer" style="display:none; margin-top:15px;">
+                <p><strong>File:</strong> <span id="uploadFileName"></span></p>
+                <div class="progress">
+                    <div id="uploadProgressBar"
+                         class="progress-bar progress-bar-striped active"
+                         role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="width:0%">
+                        0%
+                    </div>
+                </div>
+
+                <div id="uploadStatusAlert" class="alert" style="margin-top: 10px; padding: 10px;"></div>
+
+                <div id="uploadControls" style="margin-top: 10px;">
+                    <button type="button" id="pauseButton" class="btn btn-warning" style="display:none;">
+                        <i class="glyphicon glyphicon-pause"></i> Pause
+
+                    </button>
+
+                    <button type="button" id="resumeButton" class="btn btn-info" style="display:none;">
+                        <i class="glyphicon glyphicon-play"></i> Resume
+                    </button>
+
+                    <button type="button" id="retryButton" class="btn btn-primary" style="display:none;">
+
+                        <i class="glyphicon glyphicon-repeat"></i> Retry
+                    </button>
+                    <button type="button" id="cancelButton" class="btn btn-danger" style="display:none;">
+
+                        <i class="glyphicon glyphicon-remove"></i> Cancel
+
+                    </button>
+                </div>
+
+                <div id="finalizationProgressContainer" style="display:none; margin-top:15px;">
+                    <p><strong>Finalization Progress:</strong></p>
+                    <div class="progress">
+                        <div id="mergeProgressBar"
+                             class="progress-bar progress-bar-info"
+                             role="progressbar" aria-valuemin="0" aria-valuemax="100" style="width:0%">
+                            Merge: 0%
+
+                        </div>
+
+                    </div>
+                    <div id="zipStageContainer" style="display:none; margin-top:5px;">
+                        <div class="progress">
+                            <div id="zipProgressBar"
+                                 class="progress-bar progress-bar-info"
+                                 role="progressbar" aria-valuemin="0" aria-valuemax="100" style="width:0%">
+                                Zip: 0%
+                            </div>
+
+
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="folderContentsWrapper">
+        @{ Html.RenderAction("GetFolderContents", "File", new { folderId = Model.CurrentFolder.Id }); }
+    </div>
+</div>
+
+<script src="@Url.Content("~/Scripts/crypto-js.min.js")"></script>
+
+@section scripts {
+    <script type="text/javascript">
+        $(document).ready(function () {
+            // --- VARIABLES ---
+
+
+            var folderId = null;
+            var fileObj = null;
+
+            // --- SELECTORS ---
+            var $fileInput = $("#fileInput");
+            var $uploadButton = $("#uploadButton");
+            var $createFolderButton = $("#createFolderButton");
+            var $uploadFolderId = $("#uploadFolderId");
+            var $uploadStatusAlert = $("#uploadStatusAlert");
+            var $progressContainer = $("#uploadProgressContainer");
+
+
+            // --- Simplified Interaction Lock ---
+            function lockUI(isLocked) {
+                $fileInput.prop("disabled", isLocked);
+                $uploadButton.prop("disabled", isLocked);
+                $createFolderButton.prop("disabled", isLocked);
+                // You can add other elements you want to disable here
+            }
+
+            // --- DEBUGGING UPLOAD FUNCTION ---
+            function startUpload() {
+                console.log("Step 1: startUpload() function has been called.");
+
+                // Lock the UI
+                lockUI(true);
+                console.log("Step 2: UI has been locked.");
+
+                fileObj = $fileInput[0].files[0];
+                if (!fileObj) {
+                    alert("DEBUG: No file was selected. Please select a file and try again.");
+                    lockUI(false); // Unlock UI
+                    return;
+                }
+                console.log("Step 3: File object has been created. File name: " + fileObj.name);
+
+                // Get necessary data for the AJAX call
+                var totalFileSize = fileObj.size;
+                var createZip = $("#zipFileCheckbox").is(":checked");
+
+                console.log("Step 4: Preparing to call CheckDiskSpace via AJAX.");
+                console.log("Data to be sent: { totalFileSize: " + totalFileSize + ", createZip: " + createZip + " }");
+
+                // Show a status message
+                $progressContainer.show();
+                $uploadStatusAlert.html("<strong>Checking server disk space...</strong> Please wait.")
+                                  .removeClass()
+                                  .addClass('alert alert-info');
+
+                // --- The AJAX call to test ---
+                $.ajax({
+                    url: '@Url.Action("CheckDiskSpace", "File")',
+                    type: 'POST',
+                    data: {
+                        totalFileSize: totalFileSize,
+                        createZip: createZip
+                    },
+                    success: function (response) {
+                        console.log("Step 5 (SUCCESS): AJAX call succeeded. Server responded.", response);
+                        if (response.success) {
+                            // *** MODIFIED ALERT FOR DEBUGGING ***
+                            // It will now show the debug_message from the server.
+                            var successMessage = "SUCCESS!\n\nThe server reports enough disk space is available.\n\n";
+                            if (response.debug_message) {
+                                successMessage += "--- Server Debug Info ---\n" + response.debug_message;
+                            }
+                            alert(successMessage);
+                            $uploadStatusAlert.html("Disk space check successful.").addClass('alert-success');
+                        } else {
+                            // This will show the more detailed error message from the C# code
+                            alert("ERROR (from server):\n\n" + response.message);
+                            $uploadStatusAlert.html("Server Error: " + response.message).addClass('alert-danger');
+                        }
+                        lockUI(false); // Unlock UI after response
+                    },
+                    error: function (xhr, status, error) {
+                        console.error("Step 5 (ERROR): AJAX call failed.", xhr, status, error);
+                        alert("CRITICAL ERROR:\n\nThe request to the server failed entirely. Check the console for details.\n\nStatus: " + status + "\nError: " + error);
+                        $uploadStatusAlert.html("A critical network or server error occurred.").addClass('alert-danger');
+                        lockUI(false); // Unlock UI on error
+                    }
+                });
+            }
+
+            // --- EVENT HANDLER ---
+            $uploadButton.on("click", function () {
+                // This is the only code that runs when you click the button
+                console.log("Upload button clicked. Getting folder ID and calling startUpload.");
+                folderId = $uploadFolderId.val();
+                startUpload();
+            });
+
+            // Other functions for folder navigation etc. can remain here if needed.
+        });
+    </script>
+}
+
+
+
+
+//A -end
+
+
+
+
+//B -start
+@model BOBDrive.ViewModels.FolderViewModel
+
+@{
+    ViewBag.Title = "My BOB Drive";
+}
+
+<div class="modal fade" id="createFolderModal" tabindex="-1" role="dialog" aria-labelledby="createFolderModalLabel">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                <h4 class="modal-title" id="createFolderModalLabel">Create New Folder</h4>
+            </div>
+            <div class="modal-body">
+                <form id="createFolderForm" onsubmit="return false;">
+                    <div class="form-group">
+                        <label for="newFolderName">Folder Name</label>
+                        <input type="text" id="newFolderName" class="form-control" placeholder="Enter folder name" required>
+                    </div>
+                    <div id="createFolderError" class="text-danger" style="margin-top:10px;"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="createFolderBtnModal">Create</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="shareModal" tabindex="-1" role="dialog" aria-labelledby="shareModalLabel">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+                <h4 class="modal-title" id="shareModalLabel">Share File: <strong id="shareModalFileName"></strong></h4>
+            </div>
+            <div class="modal-body">
+                <form id="shareLinkForm" onsubmit="return false;">
+                    @Html.AntiForgeryToken()
+                    <input type="hidden" id="shareFileIdModal" name="FileId" />
+
+                    <div class="form-group">
+                        <label for="sharePasswordModal">Optional: Protect the link with a separate password</label>
+                        <input type="password" id="sharePasswordModal" class="form-control" placeholder="Leave blank for no link password" />
+                    </div>
+
+                    <div id="shareLinkPasswordInfo" class="alert alert-info" style="display:none;">
+                        <strong>This is a zipped file.</strong> The password to open the file is:
+                        <div class="input-group" style="margin-top:5px;">
+                            <input type="text" class="form-control" id="shareLinkPasswordText" readonly style="background:white;" />
+                            <span class="input-group-btn">
+                                <button class="btn btn-default copy-password-btn" type="button" title="Copy Password">
+                                    <i class="glyphicon glyphicon-copy"></i>
+                                </button>
+                            </span>
+                        </div>
+                    </div>
+
+                    <div id="shareError" class="text-danger" style="margin-top:10px;"></div>
+
+                    <div id="generatedLinkContainer" style="display: none; margin-top: 15px;">
+                        <label>Generated Link:</label>
+                        <div class="input-group">
+                            <input type="text" id="generatedLinkText" class="form-control" readonly />
+                            <span class="input-group-btn">
+                                <button class="btn btn-default" type="button" id="copyLinkBtn">Copy</button>
+                            </span>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
+                <button type="button" class="btn btn-primary" id="createShareLinkBtnModal">Create Link</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="container" style="margin-top:20px;">
+    <h2>@ViewBag.Title</h2>
+    <hr />
+
+    <div class="panel panel-default">
+        <div class="panel-body">
+            <div class="row">
+                <div class="col-sm-8">
+                    <form id="chunkUploadForm" onsubmit="return false;">
+                        <input type="hidden" id="uploadFolderId" name="folderId" value="@Model.CurrentFolder.Id" />
+                        <div class="form-group">
+                            <label for="fileInput">Select a file to upload</label>
+                            <p class="text-muted">Upload destination: <strong id="uploadFolderName">@Model.CurrentFolder.Name</strong></p>
+                            <div class="input-group">
+                                <input type="file" name="file" id="fileInput" class="form-control" required />
+                                <span class="input-group-btn">
+                                    <button type="button" id="uploadButton" class="btn btn-success">
+                                        <i class="glyphicon glyphicon-upload"></i> Upload
+                                    </button>
+                                </span>
+                            </div>
+                            <div class="checkbox" style="margin-top: 10px;">
+                                <label>
+                                    <input type="checkbox" id="zipFileCheckbox"> Create a password-protected ZIP archive
+                                </label>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="col-sm-4 text-right">
+                    <label>Folder Actions</label>
+                    <br />
+                    <button type="button" id="createFolderButton" class="btn btn-primary">
+                        <i class="glyphicon glyphicon-plus"></i> Create Folder
+                    </button>
+                </div>
+            </div>
+
+            <div id="uploadProgressContainer" style="display:none; margin-top:15px;">
+                <p><strong>File:</strong> <span id="uploadFileName"></span></p>
+                <!-- Main overall progress bar -->
+                <div class="progress">
+                    <div id="uploadProgressBar"
+                         class="progress-bar progress-bar-striped active"
+                         role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="width:0%">
+                        0%
+                    </div>
+                </div>
+                <div id="uploadStatusAlert" class="alert" style="margin-top: 10px; padding: 10px;"></div>
+
+                <!-- Controls: Pause / Resume / Retry / Cancel -->
+                <div id="uploadControls" style="margin-top: 10px;">
+                    <button type="button" id="pauseButton" class="btn btn-warning" style="display:none;">
+                        <i class="glyphicon glyphicon-pause"></i> Pause
+                    </button>
+                    <button type="button" id="resumeButton" class="btn btn-info" style="display:none;">
+                        <i class="glyphicon glyphicon-play"></i> Resume
+                    </button>
+                    <button type="button" id="retryButton" class="btn btn-primary" style="display:none;">
+                        <i class="glyphicon glyphicon-repeat"></i> Retry
+                    </button>
+                    <button type="button" id="cancelButton" class="btn btn-danger" style="display:none;">
+                        <i class="glyphicon glyphicon-remove"></i> Cancel
+                    </button>
+                </div>
+
+                <!-- NEW: Finalization progress section -->
+                <div id="finalizationProgressContainer" style="display:none; margin-top:15px;">
+                    <p><strong>Finalization Progress:</strong></p>
+                    <!-- Merge stage bar -->
+                    <div class="progress">
+                        <div id="mergeProgressBar"
+                             class="progress-bar progress-bar-info"
+                             role="progressbar" aria-valuemin="0" aria-valuemax="100" style="width:0%">
+                            Merge: 0%
+                        </div>
+                    </div>
+                    <!-- Zip stage bar; displayed only when ZIP is selected -->
+                    <div id="zipStageContainer" style="display:none; margin-top:5px;">
+                        <div class="progress">
+                            <div id="zipProgressBar"
+                                 class="progress-bar progress-bar-info"
+                                 role="progressbar" aria-valuemin="0" aria-valuemax="100" style="width:0%">
+                                Zip: 0%
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="folderContentsWrapper">
+        @{ Html.RenderAction("GetFolderContents", "File", new { folderId = Model.CurrentFolder.Id }); }
+    </div>
+</div>
+
+<!-- Include CryptoJS locally; ensure ~/Scripts/crypto-js.min.js exists -->
+<script src="@Url.Content("~/Scripts/crypto-js.min.js")"></script>
+
+@section scripts {
+    <script type="text/javascript">
+        $(document).ready(function () {
+            // --- VARIABLES ---
+            var CHUNK_SIZE = 10 * 1024 * 1024; // 10 MB
+            // *** UI STATE FIX: Added PREPARING state ***
+            var UPLOAD_STATE = {
+                IDLE: 0,
+                PREPARING: 0.5, // New state for checksum calculation
+                UPLOADING: 1,
+                PAUSED: 2,
+                FINALIZING: 3,
+                ERROR: 4,
+                CANCELLING: 5,
+                DONE: 6
+            };
+            var chunkRetryAttempts = 0;
+            var MAX_CHUNK_RETRIES = 3;
+            var currentState = UPLOAD_STATE.IDLE;
+            var currentChunk = 0, totalChunks = 0, fileIdForUpload = null, folderId = null;
+            var fileObj = null, totalFileSize = 0, fileContentType = null;
+            var originalFileChecksum = null;
+            var createZip = false;
+            var finalizationPoller = null;
+            var progressHistory = [];
+            var ETR_SMOOTHING_FACTOR = 5;
+            // jQuery selectors
+            var $fileInput = $("#fileInput");
+            var $uploadButton = $("#uploadButton");
+            var $createFolderButton = $("#createFolderButton");
+            var $pauseButton = $("#pauseButton");
+            var $resumeButton = $("#resumeButton");
+            var $retryButton = $("#retryButton");
+            var $cancelButton = $("#cancelButton");
+            var $progressContainer = $("#uploadProgressContainer");
+            var $progressBar = $("#uploadProgressBar");
+            var $uploadStatusAlert = $("#uploadStatusAlert");
+            var $uploadFileName = $("#uploadFileName");
+            var $uploadFolderId = $("#uploadFolderId");
+            var $uploadFolderName = $("#uploadFolderName");
+            var $finalizationContainer = $("#finalizationProgressContainer");
+            var $mergeBar = $("#mergeProgressBar");
+            var $zipStageContainer = $("#zipStageContainer");
+            var $zipBar = $("#zipProgressBar");
+
+
+            // --- NEW: Helper function to calculate checksum for a single blob/chunk ---
+            function calculateChecksumForBlob(blob) {
+                return new Promise(function (resolve, reject) {
+                    var reader = new FileReader();
+                    reader.onload = function (e) {
+                        try {
+                            var wordArray = CryptoJS.lib.WordArray.create(e.target.result);
+                            // Use the direct hashing method for single chunks, which is faster.
+                            var hash = CryptoJS.SHA256(wordArray);
+                            resolve(hash.toString(CryptoJS.enc.Hex));
+                        } catch (ex) {
+                            reject("Error calculating chunk checksum: " + ex);
+                        }
+                    };
+                    reader.onerror = function (err) {
+                        reject("Error reading blob for checksum: " + err);
+                    };
+                    reader.readAsArrayBuffer(blob);
+                });
+            }
+
+
+
+            // --- HELPER FUNCTIONS ---
+            function calculateChecksumStreaming(file, onProgress) {
+                return new Promise(function (resolve, reject) {
+                    var chunkSizeLocal = 5 * 1024 * 1024; // 5 MB
+                    var totalChunksLocal = Math.ceil(file.size / chunkSizeLocal);
+                    var currentChunkLocal = 0;
+                    var sha256Hasher = CryptoJS.algo.SHA256.create();
+                    var fileReader = new FileReader();
+
+                    fileReader.onload = function (e) {
+                        var wordArray = CryptoJS.lib.WordArray.create(e.target.result);
+                        sha256Hasher.update(wordArray);
+                        currentChunkLocal++;
+                        if (typeof onProgress === "function") {
+                            var pct = Math.round((currentChunkLocal / totalChunksLocal) * 100);
+                            onProgress(pct);
+                        }
+                        if (currentChunkLocal < totalChunksLocal) {
+                            readNextChunk();
+                        } else {
+                            try {
+                                var hash = sha256Hasher.finalize();
+                                resolve(hash.toString(CryptoJS.enc.Hex));
+                            } catch (ex) {
+                                reject("Error finalizing checksum: " + ex);
+                            }
+                        }
+                    };
+
+                    fileReader.onerror = function (err) {
+                        console.error("Error reading file chunk for checksum:", err);
+                        reject("Error reading file for checksum calculation.");
+                    };
+
+                    function readNextChunk() {
+                        var offset = currentChunkLocal * chunkSizeLocal;
+                        var slice = file.slice(offset, offset + chunkSizeLocal);
+                        fileReader.readAsArrayBuffer(slice);
+                    }
+
+                    if (typeof onProgress === "function") {
+                        onProgress(0);
+                    }
+                    readNextChunk();
+                });
+            }
+
+            function calculateETR() {
+                if (progressHistory.length < 2) {
+                    return "(ETR: calculating...)";
+                }
+                var first = progressHistory[0];
+                var last = progressHistory[progressHistory.length - 1];
+                var progressDelta = last.progress - first.progress;
+                var timeDelta = (last.time - first.time) / 1000;
+                if (progressDelta <= 0 || timeDelta <= 0) {
+                    return "(ETR: calculating...)";
+                }
+                var rate = progressDelta / timeDelta;
+                var remainingProgress = 100 - last.progress;
+                var remainingSeconds = Math.round(remainingProgress / rate);
+                if (remainingSeconds < 0 || remainingSeconds > 3600 * 2) {
+                    return "(ETR: calculating...)";
+                }
+                if (remainingSeconds < 60) {
+                    return "(ETR: about " + remainingSeconds + " seconds)";
+                } else {
+                    return "(ETR: about " + Math.ceil(remainingSeconds / 60) + " minutes)";
+                }
+            }
+
+            function handleError(message, allowRetry) {
+                clearInterval(finalizationPoller);
+                finalizationPoller = null;
+                currentState = UPLOAD_STATE.ERROR;
+                updateStatus((currentChunk / totalChunks) * 100, message, 'danger');
+                $retryButton.toggle(allowRetry !== false);
+                $pauseButton.hide();
+                $resumeButton.hide();
+                updateButtonStates();
+                updateInteractionLock();
+            }
+
+            function resetUploadUI() {
+                currentState = UPLOAD_STATE.IDLE;
+                fileObj = null;
+                fileIdForUpload = null;
+                originalFileChecksum = null;
+                progressHistory = [];
+                $fileInput.val('');
+                $progressContainer.hide();
+                updateProgressBar(0);
+                // Hide finalization UI
+                $finalizationContainer.hide();
+                resetStageBars();
+                updateButtonStates();
+                updateInteractionLock();
+                clearInterval(finalizationPoller);
+                finalizationPoller = null;
+            }
+
+            function updateProgressBar(percentage, useSpinner) {
+                percentage = Math.floor(percentage);
+                $progressBar.css("width", percentage + "%").attr("aria-valuenow", percentage).text(percentage + "%");
+                if (useSpinner === true) {
+                    $progressBar.addClass("progress-bar-striped active");
+                } else {
+                    $progressBar.removeClass("progress-bar-striped active");
+                }
+                if (percentage >= 100) {
+                    $progressBar.removeClass("progress-bar-info").addClass("progress-bar-success");
+                } else {
+                    $progressBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                }
+            }
+
+            function updateStatus(percentage, text, alertType, useSpinner) {
+                updateProgressBar(percentage, useSpinner);
+                $uploadStatusAlert.html(text || "");
+                $uploadStatusAlert
+                    .removeClass('alert-info alert-success alert-warning alert-danger')
+                    .addClass('alert-' + (alertType || 'info'));
+            }
+
+            function updateButtonStates() {
+                var isIdle = currentState === UPLOAD_STATE.IDLE;
+                var isUploading = currentState === UPLOAD_STATE.UPLOADING;
+                var isPaused = currentState === UPLOAD_STATE.PAUSED;
+                var isError = currentState === UPLOAD_STATE.ERROR;
+                var isPreparing = currentState === UPLOAD_STATE.PREPARING;
+
+                $fileInput.prop("disabled", !isIdle);
+                $uploadButton.prop("disabled", !isIdle);
+
+                // Only show Pause button if actually uploading, not while preparing
+                $pauseButton.toggle(isUploading);
+                $resumeButton.toggle(isPaused);
+                $retryButton.toggle(isError);
+
+                // Show Cancel button if preparing, uploading, paused, error, or finalizing
+                var canCancel = isPreparing || isUploading || isPaused || isError || (currentState === UPLOAD_STATE.FINALIZING);
+                $cancelButton.toggle(canCancel);
+            }
+
+            function updateInteractionLock() {
+                var isLocked = (currentState !== UPLOAD_STATE.IDLE && currentState !== UPLOAD_STATE.DONE);
+                $createFolderButton.prop("disabled", isLocked);
+                var folderRows = $("#folderContentsWrapper").find(".folder-row");
+                if (isLocked) {
+                    folderRows.addClass("disabled-row").css("cursor", "not-allowed");
+                } else {
+                    folderRows.removeClass("disabled-row").css("cursor", "pointer");
+                }
+            }
+
+            function generateGuid() {
+                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+                    var r = (new Date().getTime() + Math.random() * 16) % 16 | 0;
+                    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+                });
+            }
+
+            // Reset the merge and zip sub-bars
+            function resetStageBars() {
+                $mergeBar.css("width", "0%").attr("aria-valuenow", 0).text("Merge: 0%");
+                $mergeBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                $zipBar.css("width", "0%").attr("aria-valuenow", 0).text("Zip: 0%");
+                $zipBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                $zipStageContainer.hide();
+            }
+
+            // --- CORE UPLOAD LOGIC ---
+            function startUpload() {
+                fileContentType = fileObj.type || "application/octet-stream";
+                totalChunks = Math.ceil(totalFileSize / CHUNK_SIZE);
+                fileIdForUpload = generateGuid();
+                folderId = $uploadFolderId.val();
+                currentChunk = 0;
+
+                // 1. Set state to PREPARING first
+                currentState = UPLOAD_STATE.PREPARING;
+                createZip = $("#zipFileCheckbox").prop("checked");
+
+                $uploadFileName.text(fileObj.name);
+                $progressContainer.show();
+                updateButtonStates();
+                updateInteractionLock();
+
+                $finalizationContainer.hide();
+                resetStageBars();
+
+                // 2. Start checksum calculation
+                updateStatus(0, 'Calculating file checksum for integrity check... 0%', 'info', true);
+                calculateChecksumStreaming(fileObj, function (pct) {
+                    updateStatus(pct, 'Calculating file checksum for integrity check... ' + pct + '%', 'info', true);
+                }).then(function (hashHex) {
+                    originalFileChecksum = hashHex;
+
+                    // 3. Check disk space
+                    $.post(
+                        '@Url.Action("CheckDiskSpace", "File")',
+                        { totalFileSize: totalFileSize },
+                        function (response) {
+                            if (response.success) {
+                                // 4. Set state to UPLOADING only after checksum and disk check are done
+                                currentState = UPLOAD_STATE.UPLOADING;
+                                updateButtonStates(); // Update buttons again before starting chunk upload
+                                uploadNextChunk();
+                            } else {
+                                handleError("Disk space check failed: " + response.message, false);
+                            }
+                        }
+                    ).fail(function () {
+                        handleError("Could not contact server to check disk space.", false);
+                    });
+                }).catch(function (err) {
+                    console.error("Checksum calculation failed:", err);
+                    handleError("Could not calculate file checksum. Please try again.", false);
+                });
+            }
+
+            // NEW VERSION of uploadNextChunk
+            function uploadNextChunk() {
+                if (currentState !== UPLOAD_STATE.UPLOADING) {
+                    return;
+                }
+                if (currentChunk >= totalChunks) {
+                    startFinalization();
+                    return;
+                }
+
+                var start = currentChunk * CHUNK_SIZE;
+                var end = Math.min(start + CHUNK_SIZE, totalFileSize);
+                var chunkBlob = fileObj.slice(start, end);
+
+                // --- NEW: Calculate checksum for the chunk before uploading ---
+                calculateChecksumForBlob(chunkBlob).then(function (chunkChecksum) {
+
+                    var formData = new FormData();
+                    formData.append("chunk", chunkBlob, fileObj.name + ".chunk" + currentChunk);
+                    formData.append("fileIdForUpload", fileIdForUpload);
+                    formData.append("chunkNumber", currentChunk);
+                    formData.append("totalChunks", totalChunks);
+                    formData.append("originalFileName", fileObj.name);
+                    formData.append("folderId", folderId);
+                    formData.append("totalFileSize", totalFileSize);
+                    formData.append("fileContentType", fileContentType);
+                    formData.append("chunkChecksum", chunkChecksum); // <-- Append the new checksum
+
+                    var percentage = (currentChunk / totalChunks) * 100;
+                    updateStatus(percentage, "Uploading chunk " + (currentChunk + 1) + " of " + totalChunks + "...", 'info');
+
+                    $.ajax({
+                        url: '@Url.Action("UploadChunk", "File")',
+                        type: "POST",
+                        data: formData,
+                        processData: false,
+                        contentType: false,
+                        success: function (response) {
+                            if (response.success) {
+                                chunkRetryAttempts = 0; // Reset retry counter on success
+                                currentChunk++;
+                                uploadNextChunk();
+                            } else if (response.retry) {
+                                // --- NEW: Handle specific retry request from server ---
+                                chunkRetryAttempts++;
+                                if (chunkRetryAttempts > MAX_CHUNK_RETRIES) {
+                                    handleError("Chunk upload failed after " + MAX_CHUNK_RETRIES + " attempts. Please cancel and try again.", true);
+                                } else {
+                                    updateStatus(percentage, response.message, 'warning');
+                                    // Wait 1 second before retrying the same chunk
+                                    setTimeout(uploadNextChunk, 1000);
+                                }
+                            } else {
+                                handleError("Error on chunk " + (currentChunk + 1) + ": " + response.message, true);
+                            }
+                        },
+                        error: function (xhr, status, err) {
+                            handleError("Network error on chunk " + (currentChunk + 1) + ": " + err, true);
+                        }
+                    });
+
+                }).catch(function (err) {
+                    // Handle error during chunk checksum calculation
+                    handleError("Could not calculate chunk checksum. Error: " + err, false);
+                });
+            }
+
+            function startFinalization() {
+                currentState = UPLOAD_STATE.FINALIZING;
+                updateStatus(100, "All chunks sent. Finalizing file on server...", 'info', true);
+                updateButtonStates();
+                updateInteractionLock();
+
+                // Show finalization UI
+                $finalizationContainer.show();
+                // Show merge bar; zip bar only if createZip
+                $mergeBar.text("Merge: 0%");
+                $mergeBar.css("width", "0%").attr("aria-valuenow", 0);
+                if (createZip) {
+                    $zipStageContainer.show();
+                    $zipBar.text("Zip: 0%");
+                    $zipBar.css("width", "0%").attr("aria-valuenow", 0);
+                } else {
+                    $zipStageContainer.hide();
+                }
+
+                $.ajax({
+                    url: '@Url.Action("StartFinalization", "File")',
+                    type: "POST",
+                    data: {
+                        fileIdForUpload: fileIdForUpload,
+                        originalFileName: fileObj.name,
+                        folderId: folderId,
+                        totalFileSize: totalFileSize,
+                        fileContentType: fileContentType,
+                        createZip: createZip,
+                        originalFileChecksum: originalFileChecksum
+                    },
+                    success: function (response) {
+                        if (response.success && response.action === "poll") {
+                            updateStatus(0, "Processing file on server...", 'info', true);
+                            progressHistory = [];
+                            finalizationPoller = setInterval(pollFinalizationProgress, 2000);
+                        } else {
+                            handleError("Could not start finalization: " + (response.message || "Unknown error"), true);
+                        }
+                    },
+                    error: function (xhr, status, err) {
+                        handleError("Server error starting finalization: " + err, true);
+                    }
+                });
+            }
+
+            function pollFinalizationProgress() {
+                $.ajax({
+                    url: '@Url.Action("GetFinalizationProgress", "File")',
+                    type: "GET",
+                    data: { fileIdForUpload: fileIdForUpload },
+                    success: function (response) {
+                        if (response.success) {
+                            if (response.progress < 0) {
+                                handleError("An error occurred on the server during file processing. The file's contents may be corrupt. Please try uploading again.", true);
+                                return;
+                            }
+                            // Record history for ETR
+                            progressHistory.push({ time: Date.now(), progress: response.progress });
+                            if (progressHistory.length > ETR_SMOOTHING_FACTOR) {
+                                progressHistory.shift();
+                            }
+                            var etrString = calculateETR();
+                            // Update main status text
+                            updateStatus(response.progress, (createZip
+                                ? (response.progress <= 50
+                                    ? "Stage 1 of 2: Merging & Verifying... "
+                                    : "Stage 2 of 2: Creating ZIP archive... ")
+                                : "Merging chunks... ") + etrString, 'info', true);
+
+                            // Update stage bars
+                            if (createZip) {
+                                // Merge stage: 0–50 maps to 0–100% of merge bar
+                                var mergePct = Math.min(response.progress, 50) / 50 * 100;
+                                mergePct = Math.floor(mergePct);
+                                $mergeBar.css("width", mergePct + "%").attr("aria-valuenow", mergePct).text("Merge: " + mergePct + "%");
+                                if (mergePct >= 100) {
+                                    $mergeBar.removeClass("progress-bar-info").addClass("progress-bar-success");
+                                } else {
+                                    $mergeBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                                }
+                                // Zip stage: when progress>50, map (progress-50)/50*100
+                                if (response.progress > 50) {
+                                    var zipPct = (response.progress - 50) / 50 * 100;
+                                    zipPct = Math.floor(zipPct);
+                                    $zipBar.css("width", zipPct + "%").attr("aria-valuenow", zipPct).text("Zip: " + zipPct + "%");
+                                    if (zipPct >= 100) {
+                                        $zipBar.removeClass("progress-bar-info").addClass("progress-bar-success");
+                                    } else {
+                                        $zipBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                                    }
+                                } else {
+                                    // Before zip starts, keep zip bar at 0
+                                    $zipBar.css("width", "0%").attr("aria-valuenow", 0).text("Zip: 0%");
+                                    $zipBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                                }
+                            } else {
+                                // Non-zip: use merge bar for entire 0–100
+                                var mergePct2 = response.progress;
+                                mergePct2 = Math.floor(mergePct2);
+                                $mergeBar.css("width", mergePct2 + "%").attr("aria-valuenow", mergePct2).text("Merge: " + mergePct2 + "%");
+                                if (mergePct2 >= 100) {
+                                    $mergeBar.removeClass("progress-bar-info").addClass("progress-bar-success");
+                                } else {
+                                    $mergeBar.removeClass("progress-bar-success").addClass("progress-bar-info");
+                                }
+                                $zipStageContainer.hide();
+                            }
+
+                            if (response.isDone) {
+                                clearInterval(finalizationPoller);
+                                finalizationPoller = null;
+                                currentState = UPLOAD_STATE.DONE;
+                                updateStatus(100, "Success! File '" + response.fileName + "' created.", 'success');
+                                setTimeout(function () {
+                                    resetUploadUI();
+                                    loadFolder(folderId);
+                                }, 2000);
+                            }
+                        } else {
+                            handleError("Error checking progress: " + response.message, true);
+                        }
+                    },
+                    error: function (xhr, status, err) {
+                        handleError("Network error while checking progress: " + err, true);
+                    }
+                });
+            }
+
+            // --- EVENT HANDLERS ---
+
+            $uploadButton.on("click", function () {
+                if ($fileInput[0].files.length === 0) {
+                    alert("Please select a file to upload.");
+                    return;
+                }
+                fileObj = $fileInput[0].files[0];
+                totalFileSize = fileObj.size;
+                startUpload();
+            });
+
+            $pauseButton.on("click", function () {
+                currentState = UPLOAD_STATE.PAUSED;
+                updateStatus((currentChunk / totalChunks) * 100, "Upload paused.", 'info');
+                updateButtonStates();
+            });
+
+            $resumeButton.on("click", function () {
+                currentState = UPLOAD_STATE.UPLOADING;
+                updateStatus((currentChunk / totalChunks) * 100, "Resuming upload...", 'info');
+                updateButtonStates();
+                uploadNextChunk();
+            });
+
+            $retryButton.on("click", function () {
+                var wasFinalizing = (currentState === UPLOAD_STATE.FINALIZING || (currentChunk >= totalChunks));
+                currentState = UPLOAD_STATE.UPLOADING;
+                updateButtonStates();
+                if (wasFinalizing) {
+                    startFinalization();
+                } else {
+                    uploadNextChunk();
+                }
+            });
+
+            $cancelButton.on("click", function () {
+                if (!fileIdForUpload) {
+                    resetUploadUI();
+                    return;
+                }
+                if (confirm("Are you sure you want to cancel this operation?")) {
+                    clearInterval(finalizationPoller);
+                    finalizationPoller = null;
+                    currentState = UPLOAD_STATE.CANCELLING;
+                    updateStatus((currentChunk / totalChunks) * 100, "Cancelling...", 'warning');
+                    updateButtonStates();
+                    updateInteractionLock();
+                    $.post(
+                        '@Url.Action("CancelUpload", "File")',
+                        { fileIdForUpload: fileIdForUpload }
+                    ).always(function () {
+                        resetUploadUI();
+                    });
+                }
+            });
+
+            $(window).on('beforeunload', function () {
+                if (currentState === UPLOAD_STATE.UPLOADING ||
+                    currentState === UPLOAD_STATE.FINALIZING ||
+                    currentState === UPLOAD_STATE.CANCELLING) {
+                    return 'An operation is in progress. Are you sure you want to leave? Changes will be lost.';
+                }
+            });
+
+            // --- FOLDER & MODAL LOGIC ---
+
+            function loadFolder(folderIdToLoad) {
+                $.get('@Url.Action("GetFolderContents", "File")', { folderId: folderIdToLoad },
+                    function (html) {
+                        $("#folderContentsWrapper").html(html);
+                        var newFolderName = $("#currentFolderNameFromPartial").val();
+                        $uploadFolderName.text(newFolderName || "My Drive");
+                        bindDynamicContentEvents();
+                    }
+                );
+            }
+
+            function bindCreateFolderEvents() {
+                $createFolderButton.off("click").on("click", function () {
+                    $("#newFolderName").val("");
+                    $("#createFolderError").text("").hide();
+                    $("#createFolderModal").modal("show");
+                });
+
+                $("#createFolderBtnModal").off("click").on("click", function () {
+                    var folderName = $("#newFolderName").val();
+                    var parentFolderId = $uploadFolderId.val();
+                    var $errorDiv = $("#createFolderError");
+                    if (!folderName || folderName.trim() === "") {
+                        $errorDiv.text("Folder name cannot be empty.").show();
+                        return;
+                    }
+                    $.ajax({
+                        url: '@Url.Action("CreateFolder", "File")',
+                        type: "POST",
+                        data: {
+                            folderName: folderName,
+                            parentFolderId: parentFolderId
+                        },
+                        success: function (response) {
+                            if (response.success) {
+                                $("#createFolderModal").modal("hide");
+                                loadFolder(parentFolderId);
+                            } else {
+                                $errorDiv.text(response.message || "An unknown error occurred.").show();
+                            }
+                        },
+                        error: function () {
+                            $errorDiv.text("A server error occurred. Please try again.").show();
+                        }
+                    });
+                });
+            }
+
+            function bindFolderNavigationEvents() {
+                $("#folderContentsWrapper").off("click", ".folder-row").on("click", ".folder-row", function () {
+                    if ($(this).hasClass("disabled-row")) {
+                        return;
+                    }
+                    var newFolderId = $(this).data("folderid");
+                    $uploadFolderId.val(newFolderId);
+                    loadFolder(newFolderId);
+                });
+            }
+
+            function bindShareModal() {
+                var $shareModal = $("#shareModal");
+                var $sharePassword = $("#sharePasswordModal");
+                var $shareFileIdHidden = $("#shareFileIdModal");
+                var $shareError = $("#shareError");
+                var $generatedLinkContainer = $("#generatedLinkContainer");
+                var $generatedLinkText = $("#generatedLinkText");
+
+                $("#folderContentsWrapper").off("click", ".share-link-btn").on("click", ".share-link-btn", function () {
+                    var fileId = $(this).data("fileid");
+                    var fileName = $(this).data("filename");
+                    var zipPassword = $(this).closest("tr").find(".zip-password-text").val();
+
+                    $shareFileIdHidden.val(fileId);
+                    $("#shareModalFileName").text(fileName);
+                    $sharePassword.val("");
+                    $shareError.text("");
+                    $generatedLinkContainer.hide();
+                    $generatedLinkText.val("");
+
+                    if (zipPassword) {
+                        $("#shareLinkPasswordInfo").show();
+                        $("#shareLinkPasswordText").val(zipPassword);
+                    } else {
+                        $("#shareLinkPasswordInfo").hide();
+                    }
+                    $shareModal.modal("show");
+                });
+
+                $("#createShareLinkBtnModal").off("click").on("click", function (e) {
+                    e.preventDefault();
+                    $shareError.text("");
+                    $generatedLinkContainer.hide();
+                    var token = $("#shareLinkForm input[name='__RequestVerificationToken']").val();
+                    var fileId = $shareFileIdHidden.val();
+                    var pwd = $sharePassword.val();
+                    $.ajax({
+                        url: '@Url.Action("Create", "ShareableLink")',
+                        type: "POST",
+                        data: { __RequestVerificationToken: token, FileId: fileId, Password: pwd },
+                        success: function (resp) {
+                            if (resp.success) {
+                                $generatedLinkText.val(resp.link);
+                                $generatedLinkContainer.show();
+                            } else {
+                                $shareError.text(resp.message || "Error creating link.");
+                            }
+                        },
+                        error: function (xhr, status, errorThrown) {
+                            $shareError.text("An unexpected error occurred: " + errorThrown);
+                        }
+                    });
+                });
+            }
+
+            function bindMiscEvents() {
+                $("#folderContentsWrapper, #shareModal").off("click", ".copy-password-btn").on("click", ".copy-password-btn", function () {
+                    var copyText = $(this).closest('.input-group').find('input[type="text"]')[0];
+                    copyText.select();
+                    document.execCommand("copy");
+                    var $btn = $(this);
+                    $btn.find('.glyphicon').removeClass('glyphicon-copy').addClass('glyphicon-ok');
+                    setTimeout(function () {
+                        $btn.find('.glyphicon').removeClass('glyphicon-ok').addClass('glyphicon-copy');
+                    }, 1500);
+                });
+
+                $("#shareModal").off("click", "#copyLinkBtn").on("click", "#copyLinkBtn", function () {
+                    var copyText = document.getElementById("generatedLinkText");
+                    copyText.select();
+                    document.execCommand("copy");
+                });
+            }
+
+            function bindDynamicContentEvents() {
+                bindFolderNavigationEvents();
+                bindShareModal();
+                bindMiscEvents();
+            }
+
+            // INITIALIZATION
+            bindDynamicContentEvents();
+            bindCreateFolderEvents();
+        });
+    </script>
+}
+
+
+
+
+
+//B- end
